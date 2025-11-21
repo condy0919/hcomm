@@ -8,7 +8,15 @@
 #include <string>
 
 namespace hcomm {
+/// A `StatusCode` is an enumerated type indicating either no error ("OK") or an
+/// error condition. In most cases, a `Status` indicates a recoverable error.
 ///
+/// The errors listed below are the canonical errors associated with `Status`
+/// and are used throughout codebase. In general, try to return the most
+/// specific error that applies if more than one error may pertain. e.g., prefer
+/// `Cancelled` over `Error` with "Cancelled xxx" message.
+///
+/// If certain errors occur frequently, please add a dedicated code for them.
 enum class StatusCode : int {
     Ok = 0,
     Error,
@@ -52,13 +60,56 @@ private:
 };
 } // namespace internal
 
+/// The `Status` class is generally used to gracefully handle errors across API
+/// boundaries. Some of these errors maybe recoverable, but others may not. Most
+/// function which can produce a recoverable error should be designed to return
+/// either a `Status` or `StatusOr<T>`, which holds either an object of type `T`
+/// or an error.
 ///
+/// ```c++
+/// Status result = parseString();
+/// if (result.ok()) {
+///     // fine
+/// } else {
+///     // what error?
+///     std::cout << result.message() << "\n";
+/// }
+/// ```
+///
+/// Users handling status error codes should prefer checking for an Ok status by
+/// using the `ok()` method. Handling multiple error codes may use the switch
+/// statement, but only check for error codes you know how to handle; do no try
+/// to exhaustively match against all canonical error codes. Errors that cannot
+/// be handled should be logged and propagated for higher levels to deal with.
+///
+/// ```c++
+/// Status result = CallMetohd();
+/// if (!result.ok()) {
+///     LOG(ERROR) << result;
+/// }
+///
+/// switch (result.code()) {
+/// case StatusCode::InvalidArgument:
+///     // Handle it.
+///     break;
+///
+/// default:
+///     // Propagate the error otherwise.
+///     return result;
+/// }
+/// ```
+///
+/// See also `StatusOr<T>`.
 class [[nodiscard]] Status final {
 public:
+    /// Create an ok `Status`.
+    explicit Status() : Status(StatusCode::Ok) {}
+
     /// Create a `Status` with no message.
     explicit Status(StatusCode code) : rep_(toInlined(code)) {}
 
-    /// Create a `Status` with specified `code` and `msg`.
+    /// Create a `Status` with specified `code` and `msg`. If `code` is
+    /// `StatusCode::Ok`, the msg is ignored.
     Status(StatusCode code, std::string msg);
 
     Status(const Status& rhs);
