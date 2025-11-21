@@ -1,3 +1,3 @@
-# mhcom
+# hcomm
 
-Modern HCOM
+HCOM rewritten version in Modern C++

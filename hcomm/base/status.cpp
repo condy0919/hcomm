@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 
-#include "mhcom/base/status.hpp"
+#include "hcomm/base/status.hpp"
 
-namespace mhcom {
+namespace hcomm {
+Status::Status(StatusCode code, std::string msg) : rep_(toInlined(code)) {
+    if (code != StatusCode::Ok) {
+        rep_ = reinterpret_cast<std::uintptr_t>(new internal::StatusRep(code, std::move(msg)));
+    }
+}
+
 Status::Status(const Status& rhs) : rep_(rhs.rep_) {
     if (!isInlined(rep_)) {
         ptr(rep_)->ref();
@@ -39,4 +45,4 @@ StatusCode Status::code() const {
         return StatusCode::Unknown;
     }
 }
-} // namespace mhcom
+} // namespace hcomm

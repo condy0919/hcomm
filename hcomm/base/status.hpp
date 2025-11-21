@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 
-#ifndef MHCOM_BASE_STATUS_HPP_
-#define MHCOM_BASE_STATUS_HPP_
+#ifndef HCOMM_BASE_STATUS_HPP_
+#define HCOMM_BASE_STATUS_HPP_
 
 #include <atomic>
 #include <cstdint>
 #include <string>
 
-namespace mhcom {
+namespace hcomm {
 ///
 enum class StatusCode : int {
     Ok = 0,
@@ -55,11 +55,8 @@ private:
 ///
 class [[nodiscard]] Status final {
 public:
-    /// Create an Ok `Status` with no message.
-    Status() : Status(StatusCode::Ok) {}
-
     /// Create a `Status` with no message.
-    Status(StatusCode code) : rep_(toInlined(code)) {}
+    explicit Status(StatusCode code) : rep_(toInlined(code)) {}
 
     /// Create a `Status` with specified `code` and `msg`.
     Status(StatusCode code, std::string msg);
@@ -78,7 +75,9 @@ public:
     StatusCode code() const;
 
     /// Returns the message associated with the error code, if available.
-    const std::string& message() const;
+    std::string_view message() const {
+        return isInlined(rep_) ? std::string_view() : ptr(rep_)->message();
+    }
 
     /// Swap the contents of one status with another.
     friend void swap(Status& lhs, Status& rhs) noexcept {
@@ -108,12 +107,11 @@ private:
         return static_cast<int>(isInlined(rep_) ? toCode(rep_) : ptr(rep_)->code());
     }
 
-private:
     /// `Status` supports two different representations:
     /// - inlined. There is no message, code can be fetched via `rep_ >> 1`.
     /// - general. `rep_` is a pointer to `internal::StatusRep`.
     std::uintptr_t rep_;
 };
-} // namespace mhcom
+} // namespace hcomm
 
-#endif // MHCOM_BASE_STATUS_HPP_
+#endif

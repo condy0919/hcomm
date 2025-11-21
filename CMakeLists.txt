@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.16)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-project(mhcom
+project(hcomm
   VERSION 0.1.0
   LANGUAGES CXX
   DESCRIPTION "Modern hcom"
@@ -15,24 +15,24 @@ project(mhcom
 include(CTest)
 include(FetchContent)
 
-option(MHCOM_BUILD_TESTS "Build tests" OFF)
-option(MHCOM_BUILD_BENCHMARKS "Build benchmarks" OFF)
+option(HCOMM_BUILD_TESTS "Build tests" OFF)
+option(HCOMM_BUILD_BENCHMARKS "Build benchmarks" OFF)
 
 # Sources for the library are specified at the end
-add_library(mhcom "")
+add_library(hcomm "")
 
 # Alias to avoid name conflicts
-add_library(mhcom::mhcom ALIAS mhcom)
+add_library(hcomm::hcomm ALIAS hcomm)
 
 ### Compile options
 # Enable C++20 (Required)
-target_compile_features(mhcom
+target_compile_features(hcomm
   PUBLIC
     cxx_std_20
 )
 
 # Common GCC/Clang options
-target_compile_options(mhcom
+target_compile_options(hcomm
   PRIVATE
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra>
   PUBLIC
@@ -43,10 +43,10 @@ target_compile_options(mhcom
 # Enable threading support
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
-target_link_libraries(mhcom PRIVATE Threads::Threads)
+target_link_libraries(hcomm PRIVATE Threads::Threads)
 
 # Benchmark
-if(MHCOM_BUILD_BENCHMARKS)
+if(HCOMM_BUILD_BENCHMARKS)
   set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "Disable benchmark testing" FORCE)
   FetchContent_Declare(
     benchmark
@@ -59,7 +59,7 @@ if(MHCOM_BUILD_BENCHMARKS)
 endif()
 
 # Test
-if(MHCOM_BUILD_TESTS)
+if(HCOMM_BUILD_TESTS)
   # libgtest.a and libgtest_main.a will be built
   FetchContent_Declare(
     gtest
@@ -75,7 +75,7 @@ endif()
 
 ### Includes
 
-target_include_directories(mhcom PUBLIC
+target_include_directories(hcomm PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
@@ -83,4 +83,4 @@ target_include_directories(mhcom PUBLIC
 ### Install
 
 ### Sources
-add_subdirectory(mhcom)
+add_subdirectory(hcomm)
