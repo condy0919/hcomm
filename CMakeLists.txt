@@ -35,8 +35,6 @@ target_compile_features(hcomm
 target_compile_options(hcomm
   PRIVATE
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra>
-  PUBLIC
-    -fms-extensions
 )
 
 ### Libraries
