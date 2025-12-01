@@ -279,7 +279,7 @@ class [[nodiscard]] StatusOr final {
     friend class StatusOr;
 
 public:
-    /// Constructs a `StatusOr<T>` with `StatusCode::kUnknown` status. So that
+    /// Constructs a `StatusOr<T>` with `StatusCode::Unknown` status. So that
     /// `std::vector<StatusOr<T>>` can be resize-able.
     explicit StatusOr() : status_(StatusCode::Unknown) {}
 
