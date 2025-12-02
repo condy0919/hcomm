@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <exception>
 #include <string>
+#include <utility>
 
 namespace hcomm {
 /// A `StatusCode` is an enumerated type indicating either no error ("OK") or an
@@ -404,11 +405,9 @@ public:
     /// Returns a reference to the current `Status` contained with the
     /// `StatusOr<T>`. If `StatusOr<T>` contains a `T`, then the result must be
     /// ok.
-    const Status& status() const& {
-        return status_;
-    }
-    Status status() && {
-        return ok() ? Status() : std::move(status_);
+    template <typename Self>
+    decltype(auto) status(this Self&& self) {
+        return std::forward_like<Self>(self.status_);
     }
 
     /// Returns a reference to the held value if `ok()`. Otherwise, throws
@@ -417,42 +416,25 @@ public:
     /// If you have already checked the status using `ok()`, you probably want
     /// to use `operator*()` or `operator->()` to access the value instead of
     /// `value()`.
-    T& value() & {
-        return ok() ? value_ : throw BadStatusOrAccess();
-    }
-
-    const T& value() const& {
-        return ok() ? value_ : throw BadStatusOrAccess();
-    }
-
-    T&& value() && {
-        return ok() ? std::move(value_) : throw BadStatusOrAccess();
-    }
-
-    const T&& value() const&& {
-        return ok() ? std::move(value_) : throw BadStatusOrAccess();
+    template <typename Self>
+    decltype(auto) value(this Self&& self) {
+        return self.ok() ? std::forward_like<Self>(self.value_) : throw BadStatusOrAccess();
     }
 
     /// Returns a reference to the current value.
     ///
     /// NOTE: Must be `ok()` checked before, otherwise the behavior is undefined.
-    T& operator*() {
-        return value_;
-    }
-
-    const T& operator*() const {
-        return value_;
+    template <typename Self>
+    decltype(auto) operator*(this Self&& self) {
+        return std::forward_like<Self>(self.value_);
     }
 
     /// Returns a pointer to the current value.
     ///
     /// NOTE: Must be `ok()` checked before, otherwise the behavior is undefined.
-    T* operator->() {
-        return &value_;
-    }
-
-    const T* operator->() const {
-        return &value_;
+    template <typename Self>
+    auto operator->(this Self&& self) {
+        return &self.value_;
     }
 
     /// Returns the current value if `ok()`. Otherwise constructs a value using
@@ -460,16 +442,10 @@ public:
     ///
     /// Unlike `value()`, the method returns by value, copying the current value
     /// if necessary.
-    template <typename U>
+    template <typename Self, typename U>
         requires std::convertible_to<U, T>
-    T valueOr(U&& def) const& {
-        return ok() ? value_ : static_cast<T>(std::forward<U>(def));
-    }
-
-    template <typename U>
-        requires std::convertible_to<U, T>
-    T valueOr(U&& def) && {
-        return ok() ? std::move(value_) : static_cast<T>(std::forward<U>(def));
+    T valueOr(this Self&& self, U&& def) {
+        return self.ok() ? std::forward_like<Self>(self.value_) : static_cast<T>(std::forward<U>(def));
     }
 
     /// Reconstructs the inner value `T` in-place using the provided args, using

@@ -25,10 +25,10 @@ add_library(hcomm "")
 add_library(hcomm::hcomm ALIAS hcomm)
 
 ### Compile options
-# Enable C++20 (Required)
+# Enable C++23 (Required)
 target_compile_features(hcomm
   PUBLIC
-    cxx_std_20
+    cxx_std_23
 )
 
 # Common GCC/Clang options
