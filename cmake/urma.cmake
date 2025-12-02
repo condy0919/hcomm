@@ -28,6 +28,7 @@ target_link_libraries(urma PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
 
 target_sources(urma
   PRIVATE
+    ${umdk_SOURCE_DIR}/src/urma/common/ub_util.c
     ${umdk_SOURCE_DIR}/src/urma/lib/urma/core/urma_cp_api.c
     ${umdk_SOURCE_DIR}/src/urma/lib/urma/core/urma_dp_api.c
     ${umdk_SOURCE_DIR}/src/urma/lib/urma/core/urma_main.c

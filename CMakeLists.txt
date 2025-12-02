@@ -45,7 +45,7 @@ target_link_libraries(hcomm PUBLIC Threads::Threads)
 
 # umdk::urma
 include(${hcomm_SOURCE_DIR}/cmake/urma.cmake)
-target_link_directories(hcomm PUBLIC umdk::urma)
+target_link_libraries(hcomm PUBLIC umdk::urma)
 
 # Benchmark
 if(HCOMM_BUILD_BENCHMARKS)
