@@ -3,4 +3,5 @@
 target_sources(hcomm
   PRIVATE
     jetty.cpp
+    worker.cpp
 )

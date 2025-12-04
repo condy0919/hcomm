@@ -47,6 +47,10 @@ target_link_libraries(hcomm PUBLIC Threads::Threads)
 include(${hcomm_SOURCE_DIR}/cmake/urma.cmake)
 target_link_libraries(hcomm PUBLIC umdk::urma)
 
+# spdlog
+include(${hcomm_SOURCE_DIR}/cmake/spdlog.cmake)
+target_link_libraries(hcomm PUBLIC spdlog::spdlog)
+
 # Benchmark
 if(HCOMM_BUILD_BENCHMARKS)
   set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "Disable benchmark testing" FORCE)

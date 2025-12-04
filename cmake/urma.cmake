@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+
 include(FetchContent)
 
 FetchContent_Declare(
