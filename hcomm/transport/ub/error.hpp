@@ -6,14 +6,19 @@
 namespace hcomm {
 namespace ub {
 enum class Error {
-    Syscall = 1,
+    SyscallError = 1,
 
     // URMA
-    CreateJetty,
-    CreateJfr,
-    CreateJfce,
-    CreateJfc,
-    RearmJfc,
+    CreateJettyFailed,
+    CreateJfrFailed,
+    CreateJfceFailed,
+    CreateJfcFailed,
+    RearmJfcFailed,
+    ImportJettyFailed,
+    BindJettyFailed,
+
+    // hcomm
+    AlreadyBind,
 };
 
 } // namespace ub

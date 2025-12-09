@@ -13,9 +13,9 @@ namespace hcomm {
 namespace ub {
 std::expected<Worker, Error> Worker::create(urma_context_t& urma_ctx, const WorkerCreateOptions& opts) {
     // Create JFCE
-    std::unique_ptr<urma_jfce_t, internal::JfceDeleter> jfce(urma_create_jfce(&urma_ctx));
+    std::unique_ptr<urma_jfce_t, Deleter> jfce(urma_create_jfce(&urma_ctx));
     if (!jfce) {
-        return std::unexpected(Error::CreateJfce);
+        return std::unexpected(Error::CreateJfceFailed);
     }
 
     // Create JFC
@@ -27,20 +27,20 @@ std::expected<Worker, Error> Worker::create(urma_context_t& urma_ctx, const Work
         .user_ctx = 0,
     };
 
-    std::unique_ptr<urma_jfc_t, internal::JfcDeleter> jfc(urma_create_jfc(&urma_ctx, &jfc_cfg));
+    std::unique_ptr<urma_jfc_t, Deleter> jfc(urma_create_jfc(&urma_ctx, &jfc_cfg));
     if (!jfc) {
-        return std::unexpected(Error::CreateJfc);
+        return std::unexpected(Error::CreateJfcFailed);
     }
 
     urma_status_t ret = urma_rearm_jfc(jfc.get(), /*solicited_only=*/false);
     if (ret != URMA_SUCCESS) {
-        return std::unexpected(Error::RearmJfc);
+        return std::unexpected(Error::RearmJfcFailed);
     }
 
     int flags = fcntl(jfce->fd, F_GETFL);
     if (fcntl(jfce->fd, F_SETFL, flags | O_NONBLOCK) < 0) {
         HCOMM_LOG_ERROR("Failed to set nonblocking for JFC");
-        return std::unexpected(Error::Syscall);
+        return std::unexpected(Error::SyscallError);
     }
 
     return Worker(urma_ctx, jfce.release(), jfc.release(), opts);

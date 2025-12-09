@@ -10,8 +10,7 @@
 #include <thread>
 
 #include "hcomm/transport/ub/error.hpp"
-#include "hcomm/transport/ub/internal/deleter.hpp"
-#include "urma_types.h"
+#include "hcomm/transport/ub/jetty.hpp"
 
 namespace hcomm {
 namespace ub {
@@ -44,8 +43,8 @@ private:
     std::thread rthread_;
 
     urma_context_t& urma_ctx_;
-    std::unique_ptr<urma_jfce_t, internal::JfceDeleter> jfce_;
-    std::unique_ptr<urma_jfc_t, internal::JfcDeleter> jfc_;
+    std::unique_ptr<urma_jfce_t, Deleter> jfce_;
+    std::unique_ptr<urma_jfc_t, Deleter> jfc_;
 };
 
 } // namespace ub

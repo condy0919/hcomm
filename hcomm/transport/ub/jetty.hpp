@@ -8,11 +8,48 @@
 #include <expected>
 #include <memory>
 
+#include "hcomm/base/logging.hpp"
 #include "hcomm/transport/ub/error.hpp"
-#include "hcomm/transport/ub/internal/deleter.hpp"
+#include "urma_api.h"
+#include "urma_types.h"
 
 namespace hcomm {
 namespace ub {
+/// std::unique_ptr deleter for several jetties.
+struct Deleter {
+    void operator()(urma_jfce_t* p) noexcept {
+        if (urma_status_t ret = urma_delete_jfce(p); ret != URMA_SUCCESS) {
+            HCOMM_LOG_ERROR("Unable to delete jfce, status = {}", ret);
+        }
+    }
+
+    void operator()(urma_jfc_t* p) noexcept {
+        if (urma_status_t ret = urma_delete_jfc(p); ret != URMA_SUCCESS) {
+            HCOMM_LOG_ERROR("Unable to dejete jfc, status = {}", ret);
+        }
+    }
+
+    void operator()(urma_jfr_t* p) noexcept {
+        if (urma_status_t ret = urma_delete_jfr(p); ret != URMA_SUCCESS) {
+            HCOMM_LOG_ERROR("Unable to delete jfr, status = {}", ret);
+        }
+    }
+
+    void operator()(urma_jetty_t* p) noexcept {
+        const std::uint32_t id = p->jetty_id.id;
+        if (urma_status_t ret = urma_delete_jetty(p); ret != URMA_SUCCESS) {
+            HCOMM_LOG_ERROR("Unable to delete jetty, id = {}, status = {}", id, ret);
+        }
+    }
+
+    void operator()(urma_target_jetty_t* p) noexcept {
+        const std::uint32_t tid = p->id.id;
+        if (urma_status_t ret = urma_unimport_jetty(p); ret != URMA_SUCCESS) {
+            HCOMM_LOG_ERROR("Unable to unimport target jetty, id = {}, status = {}", tid, ret);
+        }
+    }
+};
+
 enum class JettyState : std::uint8_t {
     Reset = 0, ///< The initial state when jetty is created
     Ready,     ///< Being able to send, recv, ...
@@ -26,6 +63,21 @@ struct JettyCreateOptions {
     std::uint32_t seg_count;
 };
 
+struct JettyBindInfo {
+    urma_transport_mode_t trans_mode;
+    urma_jetty_grp_policy_t policy;
+    urma_jetty_id_t jetty_id;
+    urma_target_type_t type;
+    urma_order_type_t order_type;
+    urma_token_t token;
+    // uint64_t hb_buf;
+    // uint64_t win_buf_addr;
+    // uint32_t win_buf_len;
+    uint32_t rx_depth;
+    uint32_t tx_depth;
+    // uint32_t rx_buf_size;
+};
+
 /// Jetty is a queue used to manage submitted IO tasks and received messages.
 class Jetty {
 public:
@@ -33,10 +85,14 @@ public:
                                               const JettyCreateOptions& opts);
 
     Jetty(Jetty&& rhs) noexcept
-        : id_(rhs.id_), urma_ctx_(rhs.urma_ctx_), jfr_(std::move(rhs.jfr_)), jetty_(std::move(rhs.jetty_)),
-          tjetty_(std::move(rhs.tjetty_)) {}
+        : state_(rhs.state_.load()), id_(rhs.id_), urma_ctx_(rhs.urma_ctx_), jfr_(std::move(rhs.jfr_)),
+          jetty_(std::move(rhs.jetty_)), tjetty_(std::move(rhs.tjetty_)) {
+        rhs.state_ = JettyState::Reset;
+    }
 
     ~Jetty();
+
+    std::expected<void, Error> bind(const JettyBindInfo& info);
 
 private:
     Jetty(std::uint32_t id, urma_context_t& urma_ctx, urma_jfr_t* jfr, urma_jetty_t* jetty)
@@ -44,12 +100,13 @@ private:
 
     std::atomic<JettyState> state_{JettyState::Reset};
     // 3B reserved
-    std::uint32_t id_ = 0;
+    std::uint32_t id_;
 
     urma_context_t& urma_ctx_;
-    std::unique_ptr<urma_jfr_t, internal::JfrDeleter> jfr_;
-    std::unique_ptr<urma_jetty_t, internal::JettyDeleter> jetty_;
-    std::unique_ptr<urma_target_jetty_t, internal::TargetJettyDeleter> tjetty_;
+    std::unique_ptr<urma_jfr_t, Deleter> jfr_;
+    std::unique_ptr<urma_jetty_t, Deleter> jetty_;
+    std::unique_ptr<urma_target_jetty_t, Deleter> tjetty_;
+    std::unique_ptr<JettyBindInfo> tjetty_bind_info_;
 
     //
     //     urpc_list_t qctx_node;
