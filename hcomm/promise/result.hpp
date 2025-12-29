@@ -57,15 +57,23 @@ enum class ResultState : std::uint8_t {
     Error = 2,
 };
 
-/// `Result` is a type that represents success, failure or pending. And it can be used for returning and propagating
-/// errors.
+/// `Result` is a vocabulary type representing the outcome of an operation that may succeed, fail, or be pending.
+/// It serves as a sophisticated alternative to error codes or exceptions, enabling robust error handling and
+/// state propagation.
 ///
-/// It's a `std::pair` like class with the variants:
-/// - `Ok`, representing success and containing a value
-/// - `Err`, representing error and containing an error
-/// - `Pending`, representing pending...
+/// Inspiration & Origin:
+/// This class is heavily inspired by Rust's `Result` enum and the C++23 `std::expected` utility. It extends
+/// these concepts by introducing a `Pending` state, making it particularly suitable for asynchronous programming,
+/// state machines, or scenarios where an operation's completion is deferred.
 ///
-/// Functions return `Result` whenever errors are expected and recoverable.
+/// Key Variants:
+/// - `Ok`: Represents a successful computation and holds the resulting value.
+/// - `Err`: Represents a failure and holds the error details.
+/// - `Pending`: Represents an incomplete operation (e.g., waiting for I/O).
+///
+/// Functional Composition:
+/// `Result` supports monadic operations such as `map`, `andThen`, and `orElse`, allowing for clean and expressive
+/// chaining of operations without explicit control flow checks at every step.
 template <typename T = void, typename E = void>
 class Result final {
     static_assert(!std::is_reference_v<T>, "Result cannot be used with reference type");
@@ -101,7 +109,7 @@ public:
         requires std::constructible_from<E, U&&>
     Result(Err<U>&& rhs) noexcept : state_(std::in_place_index<2>, E(std::move(rhs.error))) {}
 
-    /// Copies/Assigns if copyable/assignale.
+    /// Copies/Assigns if copyable/assignable.
     Result(const Result& rhs) = default;
     Result& operator=(const Result& rhs) = default;
 
@@ -164,12 +172,28 @@ public:
         return state() == ResultState::Error;
     }
 
+    /// Accesses the contained value.
+    ///
+    /// Requires the `Result` to be in the `Ok` state.
+    ///
+    /// Example:
+    /// @code
+    /// Result<int> res = Ok(42);
+    /// int v = res.value();
+    /// @endcode
     template <typename Self>
         requires(!std::is_void_v<T>)
     decltype(auto) value(this Self&& self) {
         return std::forward_like<Self>(std::get<1>(self.state_).value);
     }
 
+    /// Returns the contained value if `Ok`, otherwise returns `default_value`.
+    ///
+    /// Example:
+    /// @code
+    /// Result<int> res = Pending{};
+    /// int v = res.valueOr(10); // v is 10
+    /// @endcode
     template <typename Self, typename U>
         requires(!std::is_void_v<T>)
     T valueOr(this Self&& self, U&& default_value) {
@@ -180,6 +204,10 @@ public:
         }
     }
 
+    /// Extracts the value from the `Result`, leaving the `Result` in a `Pending` state.
+    ///
+    /// This method is useful when you need to move the value out of the `Result` without destroying the `Result` object
+    /// immediately. Requires the `Result` to be in the `Ok` state.
     T takeValue()
         requires(!std::is_void_v<T>)
     {
@@ -188,12 +216,19 @@ public:
         return x;
     }
 
+    /// Accesses the contained error.
+    ///
+    /// Requires the `Result` to be in the `Err` state.
     template <typename Self>
         requires(!std::is_void_v<E>)
     decltype(auto) error(this Self&& self) {
         return std::forward_like<Self>(std::get<2>(self.state_).error);
     }
 
+    /// Extracts the error from the `Result`, leaving the `Result` in a `Pending` state.
+    ///
+    /// This method is useful when you need to move the error out of the `Result`.
+    /// Requires the `Result` to be in the `Err` state.
     E takeError()
         requires(!std::is_void_v<E>)
     {
@@ -202,8 +237,16 @@ public:
         return x;
     }
 
-    /// Maps a `Result<T, E>` to `Result<U, E>` by applying a function to the contained `Ok` value. It has no effect
-    /// with `Pending` variant or `Err` variant.
+    /// Transforms the contained value via a function `f` if the result is `Ok`.
+    ///
+    /// If the result is `Pending` or `Err`, the function returns the original state unchanged.
+    ///
+    /// Example:
+    /// @code
+    /// Result<int, std::string> res = Ok(10);
+    /// auto s = res.map([](int i) { return std::to_string(i); });
+    /// // s is Ok("10")
+    /// @endcode
     template <typename Self, typename F,
               typename U =
                   typename std::conditional_t<std::is_void_v<T>, std::invoke_result<F>, std::invoke_result<F, T>>::type>
@@ -236,8 +279,16 @@ public:
         std::unreachable();
     }
 
-    /// Maps a `Result<T, E>` to `Result<T, U>` by applying a function to the contained `Err` value, leaving the
-    /// `Ok`/`Pending` value untouched.
+    /// Transforms the contained error via a function `f` if the result is `Err`.
+    ///
+    /// If the result is `Ok` or `Pending`, the function returns the original state unchanged.
+    ///
+    /// Example:
+    /// @code
+    /// Result<int, int> res = Err(404);
+    /// auto s = res.mapErr([](int e) { return "Error " + std::to_string(e); });
+    /// // s is Err("Error 404")
+    /// @endcode
     template <typename Self, typename F,
               typename U =
                   typename std::conditional_t<std::is_void_v<E>, std::invoke_result<F>, std::invoke_result<F, E>>::type>
@@ -270,7 +321,17 @@ public:
         std::unreachable();
     }
 
-    /// Calls `f` if the result is `Ok`, otherwise returns the `Err` or `Pending`.
+    /// Chains a computation that returns a `Result` if the current result is `Ok`.
+    ///
+    /// This allows for sequencing operations that might fail. If the current result is `Pending` or `Err`,
+    /// the function is not executed, and the current state is propagated.
+    ///
+    /// Example:
+    /// @code
+    /// Result<int> res = Ok(21);
+    /// auto next = res.andThen([](int val) -> Result<int> { return Ok(val * 2); });
+    /// // next is Ok(42)
+    /// @endcode
     template <typename Self, typename F,
               typename Ret =
                   typename std::conditional_t<std::is_void_v<T>, std::invoke_result<F>, std::invoke_result<F, T>>::type>
@@ -294,7 +355,17 @@ public:
         std::unreachable();
     }
 
-    /// Calls `f` if the result is `Err`, otherwise returns the `Ok` or `Pending`.
+    /// Chains a computation that returns a `Result` if the current result is `Err`.
+    ///
+    /// This is typically used for error recovery. If the current result is `Ok` or `Pending`,
+    /// the function is not executed, and the current state is propagated.
+    ///
+    /// Example:
+    /// @code
+    /// Result<int, std::string> res = Err("fail");
+    /// auto recovered = res.orElse([](const std::string&) -> Result<int, std::string> { return Ok(0); });
+    /// // recovered is Ok(0)
+    /// @endcode
     template <typename Self, typename F,
               typename Ret =
                   typename std::conditional_t<std::is_void_v<E>, std::invoke_result<F>, std::invoke_result<F, E>>::type>
