@@ -160,6 +160,10 @@ public:
         return static_cast<ResultState>(state_.index());
     }
 
+    [[nodiscard]] explicit operator bool() const {
+        return !isPending();
+    }
+
     [[nodiscard]] bool isPending() const {
         return state() == ResultState::Pending;
     }

@@ -54,6 +54,10 @@ include(${hcomm_SOURCE_DIR}/cmake/absl.cmake)
 include(${hcomm_SOURCE_DIR}/cmake/spdlog.cmake)
 target_link_libraries(hcomm PUBLIC spdlog::spdlog)
 
+# boost
+include(${hcomm_SOURCE_DIR}/cmake/boost.cmake)
+target_link_libraries(hcomm PUBLIC Boost::callable_traits)
+
 # Benchmark
 if(HCOMM_BUILD_BENCHMARKS)
   set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "Disable benchmark testing" FORCE)
