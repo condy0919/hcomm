@@ -3,6 +3,7 @@
 #ifndef HCOMM_PROMISE_PROMISE_HPP_
 #define HCOMM_PROMISE_PROMISE_HPP_
 
+#include <algorithm>
 #include <cassert>
 #include <functional>
 #include <optional>
@@ -15,9 +16,14 @@
 namespace hcomm {
 // forward
 class Context;
+class Executor;
+class SuspendedTask;
 
 template <typename C>
-concept Continuation = requires { requires IsResult<std::invoke_result_t<C, Context&>>; };
+concept Continuation = requires {
+    requires IsResult<std::invoke_result_t<C, Context&>>;
+    requires std::is_move_constructible_v<C> && std::is_move_assignable_v<C>;
+};
 
 template <Continuation C>
 class PromiseImpl;
@@ -25,31 +31,52 @@ class PromiseImpl;
 template <typename P>
 class FutureImpl;
 
-template <Continuation C>
-PromiseImpl<C> withContinuation(C);
-
 namespace internal {
-// MoveOnlyHandler
+/// A wrapper that provides uniform move construction and move assignment for callable types,
+/// enabling move semantics even for types that are not natively move-assignable (e.g., lambdas).
+///
+/// While lambdas are typically move-constructible, they are often not move-assignable.
+/// This class bridges that gap by managing the lifetime of the handler via `std::optional`,
+/// allowing for reconstruction upon assignment.
+///
+/// This type maintains a well-defined empty state. Instances that have been moved from
+/// are left in this empty state and must not be accessed.
 template <typename Handler>
+    requires std::is_move_constructible_v<Handler>
 class MoveOnlyHandler {
 public:
     MoveOnlyHandler() = default;
 
-    MoveOnlyHandler(MoveOnlyHandler&& rhs) noexcept = default;
-    MoveOnlyHandler& operator=(MoveOnlyHandler&& rhs) noexcept = default;
+    MoveOnlyHandler(Handler&& h) noexcept : handler_(std::move(h)) {}
 
-    ~MoveOnlyHandler() = default;
-
-    template <typename... Args>
-        requires std::invocable<Handler, Args...>
-    auto operator()(Args&&... args) {
-        return (handler_.value())(std::forward<Args>(args)...);
+    MoveOnlyHandler(MoveOnlyHandler&& rhs) noexcept : handler_(std::move(rhs.handler_)) {
+        rhs.handler_.reset();
     }
 
+    MoveOnlyHandler& operator=(Handler&& h) noexcept {
+        handler_.emplace(std::move(h));
+        return *this;
+    }
+
+    MoveOnlyHandler& operator=(MoveOnlyHandler&& rhs) noexcept {
+        handler_.emplace(std::move(rhs.handler_));
+        rhs.handler_.reset();
+        return *this;
+    }
+
+    /// Invokes the wrapped handler.
+    template <typename... Args>
+    auto operator()(Args&&... args) -> std::invoke_result_t<Handler, Args...> {
+        assert(handler_.has_value());
+        return (*handler_)(std::forward<Args>(args)...);
+    }
+
+    /// Checks if the handler is valid (not reset).
     explicit operator bool() const {
         return handler_.has_value();
     }
 
+    /// Resets the handler.
     void reset() {
         handler_.reset();
     }
@@ -58,38 +85,361 @@ private:
     std::optional<Handler> handler_;
 };
 
-// The continuation produced by `Promise::then()`.
-template <typename P, typename ResultHandler>
-class ThenContinuation {
+/// Adapts a handler to produce a Result or Continuation.
+template <typename Handler, typename R = boost::callable_traits::return_type_t<Handler>>
+class ResultAdaptor;
+
+/// Specialization for handlers returning Result<T, E>.
+template <typename Handler, typename T, typename E>
+class ResultAdaptor<Handler, Result<T, E>> {
 public:
+    using ResultType = Result<T, E>;
+
+    ResultAdaptor(MoveOnlyHandler<Handler> h) : handler_(std::move(h)) {}
+
+    ResultAdaptor(ResultAdaptor&& rhs) noexcept = default;
+    ResultAdaptor& operator=(ResultAdaptor&& rhs) noexcept = default;
+
+    /// Invokes the handler and returns its Result.
+    template <typename... Args>
+    ResultType operator()(Context& ctx, Args&&... args) {
+        return handler_(std::forward<Args>(args)...);
+    }
+
 private:
+    MoveOnlyHandler<Handler> handler_;
 };
 
-// The continuation produced by `Promise::andThen()`.
+/// Specialization for handlers returning a Continuation.
+template <typename Handler, Continuation C>
+class ResultAdaptor<Handler, C> {
+public:
+    using ResultType = std::invoke_result_t<C, Context&>;
+
+    ResultAdaptor(MoveOnlyHandler<Handler> h) : handler_(std::move(h)) {}
+
+    ResultAdaptor(ResultAdaptor&& rhs) noexcept = default;
+    ResultAdaptor& operator=(ResultAdaptor&& rhs) noexcept = default;
+
+    /// Invokes the handler to get the continuation, then drives the continuation.
+    template <typename... Args>
+    ResultType operator()(Context& ctx, Args&&... args) {
+        if (handler_) {
+            cont_ = handler_(std::forward<Args>(args)...);
+            handler_.reset();
+        }
+        if (!cont_) {
+            return Pending{};
+        }
+        return cont_(ctx);
+    }
+
+private:
+    MoveOnlyHandler<Handler> handler_;
+    MoveOnlyHandler<C> cont_;
+};
+
+/// Helper to extract the first type of a tuple or return an empty tuple.
+template <typename>
+struct FirstTypeOrEmpty;
+
+template <>
+struct FirstTypeOrEmpty<std::tuple<>> {
+    using Type = std::tuple<>;
+};
+
+template <typename T, typename... Ts>
+struct FirstTypeOrEmpty<std::tuple<T, Ts...>> {
+    using Type = std::tuple<T>;
+};
+
+/// Helper to remove Context& from the beginning of a tuple type.
+template <typename>
+struct TypeExceptFirstContextRef;
+
+template <typename... Ts>
+struct TypeExceptFirstContextRef<std::tuple<Context&, Ts...>> {
+    using Type = std::tuple<Ts...>;
+};
+
+template <typename... Ts>
+struct TypeExceptFirstContextRef<std::tuple<Ts...>> {
+    using Type = std::tuple<Ts...>;
+};
+
+/// Adapts a handler to be invoked with or without Context& as the first argument.
+template <typename Handler>
+class ContextAdaptor {
+    using AdaptorType = ResultAdaptor<Handler>;
+
+    static constexpr bool HasContextRefFirst =
+        std::is_same_v<typename FirstTypeOrEmpty<boost::callable_traits::args_t<Handler>>::Type, std::tuple<Context&>>;
+
+public:
+    using ResultType = typename AdaptorType::ResultType;
+
+    ContextAdaptor(Handler h) : adaptor_(std::move(h)) {}
+
+    /// Invokes the handler, automatically passing Context& if required by the handler signature.
+    template <typename... Args>
+    ResultType operator()(Context& ctx, Args&&... args) {
+        if constexpr (HasContextRefFirst) {
+            return adaptor_(ctx, ctx, std::forward<Args>(args)...);
+        } else {
+            return adaptor_(ctx, std::forward<Args>(args)...);
+        }
+    }
+
+private:
+    AdaptorType adaptor_;
+};
+
+/// Invoker for handlers taking just Context.
+template <typename Handler>
+class ContextHandlerInvoker {
+    using AdaptorType = ContextAdaptor<Handler>;
+
+public:
+    using ResultType = typename AdaptorType::ResultType;
+
+    ContextHandlerInvoker(Handler h) : adaptor_(std::move(h)) {}
+
+    /// Invokes the handler with Context.
+    ResultType operator()(Context& ctx) {
+        return adaptor_(ctx);
+    }
+
+private:
+    AdaptorType adaptor_;
+};
+
+/// Invoker for handlers taking Context and Result.
+template <typename Handler, typename R>
+class ResultHandlerInvoker {
+    using AdaptorType = ContextAdaptor<Handler>;
+
+    using Args = boost::callable_traits::args_t<Handler>;
+    static_assert(std::tuple_size_v<Args> == 1 || std::tuple_size_v<Args> == 2,
+                  "The provided handler has wrong arguments number");
+
+    static_assert(
+        std::is_same_v<typename TypeExceptFirstContextRef<Args>::Type, std::tuple<R&>> ||
+            std::is_same_v<typename TypeExceptFirstContextRef<Args>::Type, std::tuple<const R&>>,
+        "The provided handler's last argument was expected to be of type 'Result<T, E>&' or 'const Result<T, E>&'");
+
+public:
+    using ResultType = typename AdaptorType::ResultType;
+
+    ResultHandlerInvoker(Handler h) : adaptor_(std::move(h)) {}
+
+    /// Invokes the handler with Context and Result.
+    ResultType operator()(Context& ctx, R& result) {
+        return adaptor_(ctx, result);
+    }
+
+private:
+    AdaptorType adaptor_;
+};
+
+/// Invoker for handlers taking Context and Value.
+template <typename Handler, typename R, typename T = typename R::ValueType>
+class ValueHandlerInvoker {
+    using AdaptorType = ContextAdaptor<Handler>;
+
+    using Args = boost::callable_traits::args_t<Handler>;
+    static_assert(std::tuple_size_v<Args> == 1 || std::tuple_size_v<Args> == 2,
+                  "The provided handler has wrong arguments number");
+
+    static_assert(std::is_same_v<typename TypeExceptFirstContextRef<Args>::Type, std::tuple<T&>> ||
+                      std::is_same_v<typename TypeExceptFirstContextRef<Args>::Type, std::tuple<const T&>>,
+                  "The provided handler's last argument was expected to be of type 'T&' or 'const T&'");
+
+public:
+    using ResultType = typename AdaptorType::ResultType;
+
+    ValueHandlerInvoker(Handler h) : adaptor_(std::move(h)) {}
+
+    /// Invokes the handler with Context and Value.
+    ResultType operator()(Context& ctx, R& result) {
+        return adaptor_(ctx, result.value());
+    }
+
+private:
+    AdaptorType adaptor_;
+};
+
+/// Specialization for void ValueType.
+template <typename Handler, typename R>
+class ValueHandlerInvoker<Handler, R, void> {
+    using AdaptorType = ContextAdaptor<Handler>;
+
+    using Args = boost::callable_traits::args_t<Handler>;
+    static_assert(std::tuple_size_v<Args> == 0 || std::tuple_size_v<Args> == 1,
+                  "The provided handler has wrong arguments number");
+
+    static_assert(std::is_same_v<typename TypeExceptFirstContextRef<Args>::Type, std::tuple<>>,
+                  "The provided handler's should only accept a 'Context&' or nothing");
+
+public:
+    using ResultType = typename AdaptorType::ResultType;
+
+    ValueHandlerInvoker(Handler h) : adaptor_(std::move(h)) {}
+
+    /// Invokes the handler with just Context (ignoring void value).
+    ResultType operator()(Context& ctx, R& result) {
+        return adaptor_(ctx);
+    }
+
+private:
+    AdaptorType adaptor_;
+};
+
+/// Invoker for handlers taking Context and Error.
+template <typename Handler, typename R, typename E = typename R::ErrorType>
+class ErrorHandlerInvoker {
+    using AdaptorType = ContextAdaptor<Handler>;
+
+    using Args = boost::callable_traits::args_t<Handler>;
+    static_assert(std::tuple_size_v<Args> == 1 || std::tuple_size_v<Args> == 2,
+                  "The provided handler has wrong arguments number");
+
+    static_assert(std::is_same_v<typename TypeExceptFirstContextRef<Args>::Type, std::tuple<E&>> ||
+                      std::is_same_v<typename TypeExceptFirstContextRef<Args>::Type, std::tuple<const E&>>,
+                  "The provided handler's last argument was expected to be of type 'E&' or 'const E&'");
+
+public:
+    using ResultType = typename AdaptorType::ResultType;
+
+    ErrorHandlerInvoker(Handler h) : adaptor_(std::move(h)) {}
+
+    /// Invokes the handler with Context and Error.
+    ResultType operator()(Context& ctx, R& result) {
+        return adaptor_(ctx, result.error());
+    }
+
+private:
+    AdaptorType adaptor_;
+};
+
+/// Specialization for void ErrorType.
+template <typename Handler, typename R>
+class ErrorHandlerInvoker<Handler, R, void> {
+    using AdaptorType = ContextAdaptor<Handler>;
+
+    using Args = boost::callable_traits::args_t<Handler>;
+    static_assert(std::tuple_size_v<Args> == 0 || std::tuple_size_v<Args> == 1,
+                  "The provided handler has wrong arguments number");
+
+    static_assert(std::is_same_v<typename TypeExceptFirstContextRef<Args>::Type, std::tuple<>>,
+                  "The provided handler should only accept a 'Context&' or nothing");
+
+public:
+    using ResultType = typename AdaptorType::ResultType;
+
+    ErrorHandlerInvoker(Handler h) : adaptor_(std::move(h)) {}
+
+    /// Invokes the handler with just Context (ignoring void error).
+    ResultType operator()(Context& ctx, R& result) {
+        return adaptor_(ctx);
+    }
+
+private:
+    AdaptorType adaptor_;
+};
+
+/// Continuation logic for `then()`.
+template <typename P, typename Handler>
+class ThenContinuation {
+    using Invoker = ResultHandlerInvoker<Handler, typename P::ResultType>;
+
+public:
+    ThenContinuation(P promise, Handler h) : future_(std::move(promise)), invoker_(std::move(h)) {}
+
+    /// Drives the future and invokes the handler on completion.
+    auto operator()(Context& ctx) -> typename Invoker::ResultType {
+        if (!future_(ctx)) {
+            return Pending{};
+        }
+        return invoker_(ctx, future_.result());
+    }
+
+private:
+    FutureImpl<P> future_;
+    Invoker invoker_;
+};
+
+/// Continuation logic for `andThen()`.
 template <typename P, typename ValueHandler>
 class AndThenContinuation {
+    using Invoker = ValueHandlerInvoker<ValueHandler, typename P::ResultType>;
+
+    static_assert(std::is_same_v<typename Invoker::ResultType::ErrorType, typename P::ErrorType>,
+                  "The new result should be with the same error type as before");
+
 public:
+    AndThenContinuation(P promise, ValueHandler h) : future_(std::move(promise)), invoker_(std::move(h)) {}
+
+    /// Drives the future, propagates error, or invokes handler on success.
+    auto operator()(Context& ctx) -> typename Invoker::ResultType {
+        if (!future_(ctx)) {
+            return Pending{};
+        } else if (future_.isErr()) {
+            if constexpr (std::is_void_v<typename P::ErrorType>) {
+                return Err();
+            } else {
+                return Err(future_.takeError());
+            }
+        }
+        return invoker_(ctx, future_.result());
+    }
+
 private:
+    FutureImpl<P> future_;
+    Invoker invoker_;
 };
 
-// The continuation produced by `Promise::orElse()`.
+/// Continuation logic for `orElse()`.
 template <typename P, typename ErrorHandler>
 class OrElseContinuation {
+    using Invoker = ErrorHandlerInvoker<ErrorHandler, typename P::ResultType>;
+
+    static_assert(std::is_same_v<typename Invoker::ResultType::ValueType, typename P::ValueType>,
+                  "The new result should be with the same value type as before");
+
 public:
+    OrElseContinuation(P promise, ErrorHandler h) : future_(std::move(promise)), invoker_(std::move(h)) {}
+
+    /// Drives the future, propagates success, or invokes handler on error.
+    auto operator()(Context& ctx) -> typename Invoker::ResultType {
+        if (!future_(ctx)) {
+            return Pending{};
+        } else if (future_.isOk()) {
+            if constexpr (std::is_void_v<typename P::ValueType>) {
+                return Ok();
+            } else {
+                return Ok(future_.takeValue());
+            }
+        }
+        return invoker_(ctx, future_.result());
+    }
+
 private:
+    FutureImpl<P> future_;
+    Invoker invoker_;
 };
 
-// The continuation produced by `Promise::inspect()`.
+/// Continuation logic for `inspect()`.
 template <typename P, typename InspectHandler>
 class InspectContinuation {
 public:
-    explicit InspectContinuation(P promise, InspectHandler handler)
+    InspectContinuation(P promise, InspectHandler handler)
         : promise_(std::move(promise)), handler_(std::move(handler)) {}
 
+    /// Drives the promise and inspects the result if ready.
     auto operator()(Context& ctx) {
         auto result = promise_(ctx);
         if (result) {
-            if constexpr (std::is_invocable_v<InspectHandler, std::add_lvalue_reference_t<typename P::ResultType>>) {
+            if constexpr (std::is_invocable_v<InspectHandler, typename P::ResultType&>) {
                 handler_(result);
             } else {
                 handler_(ctx, result);
@@ -103,18 +453,104 @@ private:
     InspectHandler handler_;
 };
 
-// The continuation produced by `Promise::discard()`.
+/// Continuation logic for `discard()`.
 template <typename P>
 class DiscardContinuation {
 public:
     explicit DiscardContinuation(P promise) : promise_(std::move(promise)) {}
 
+    /// Drives the promise and returns void success when ready.
     Result<void, void> operator()(Context& ctx) {
-        return promise_(ctx).isPending() ? Pending{} : Ok();
+        if (promise_(ctx)) {
+            return Ok();
+        }
+        return Pending{};
     }
 
 private:
     P promise_;
+};
+
+/// Continuation that holds a ready result, produced by `makeResultPromise()`.
+template <typename T, typename E>
+class ResultContinuation {
+public:
+    explicit ResultContinuation(Result<T, E> result) : result_(std::move(result)) {}
+
+    /// Returns the stored result.
+    Result<T, E> operator()(Context& ctx) {
+        return std::move(result_);
+    }
+
+private:
+    Result<T, E> result_;
+};
+
+/// Continuation wrapping a simple handler, produced by `makePromise()`.
+template <typename Handler>
+class PromiseContinuation {
+public:
+    explicit PromiseContinuation(Handler h) : handler_(std::move(h)) {}
+
+    /// Invokes the handler.
+    auto operator()(Context& ctx) {
+        return handler_(ctx);
+    }
+
+private:
+    ContextHandlerInvoker<Handler> handler_;
+};
+
+/// Continuation logic for `joinPromises()` (variadic version).
+template <typename... Ps>
+class JoinContinuation {
+public:
+    JoinContinuation(Ps... promises) : futures_(std::move(promises)...) {}
+
+    /// Drives all futures until all are ready.
+    auto operator()(Context& ctx) {
+        return eval(ctx, std::index_sequence_for<Ps...>{});
+    }
+
+private:
+    template <std::size_t... Is>
+    auto eval(Context& ctx, std::index_sequence<Is...>) -> Result<std::tuple<typename Ps::ResultType...>, void> {
+        bool done = (std::get<Is>(futures_)(ctx) && ...);
+        if (done) {
+            return Ok(std::make_tuple(std::get<Is>(futures_).takeResult()...));
+        }
+        return Pending{};
+    }
+
+    std::tuple<FutureImpl<Ps>...> futures_;
+};
+
+/// Continuation logic for `joinPromises()` (vector version).
+template <typename Promise>
+class JoinVectorContinuation {
+public:
+    explicit JoinVectorContinuation(std::vector<Promise> promises)
+        : promises_(std::move(promises)), results_(promises_.size()) {}
+
+    /// Drives all futures until all are ready.
+    auto operator()(Context& ctx) -> Result<std::vector<typename Promise::ResultType>> {
+        bool done = true;
+        for (std::size_t i = 0; i < results_.size(); ++i) {
+            if (!results_[i]) {
+                results_[i] = promises_[i](ctx);
+                done &= static_cast<bool>(results_[i]);
+            }
+        }
+
+        if (done) {
+            return Ok(std::move(results_));
+        }
+        return Pending{};
+    }
+
+private:
+    std::vector<Promise> promises_;
+    std::vector<typename Promise::ResultType> results_;
 };
 } // namespace internal
 
@@ -123,44 +559,87 @@ private:
 /// A `Promise` is a building block for asynchronous control flow that wraps an asynchronous task in the form of a
 /// continuation that is repeatedly invoked by an executor until it produces a result.
 ///
-/// Additionally asynchronous tasks can be chained onto the promise using a variety of combinators such as `then()`.
+/// Additionally, asynchronous tasks can be chained onto the promise using a variety of combinators such as `then()`.
 ///
-/// And some helpful functions/classes:
+/// Some helpful functions/classes include:
 /// - `makePromise` creates a promise with a continuation.
-/// - `makeOkPromise` creates a promise that immediately returns a value
-/// - `makeErrPromise` creates a promise that immediately returns an error
-/// - `makeReusltPromise` creates a promise tat immediately returns a result
-/// - `Future` more conveniently holds a promise or its result
-/// - `PendingTask` wraps a promise as a pending task for execution
-/// - `Executor` executes a pending task
+/// - `makeOkPromise` creates a promise that immediately returns a value.
+/// - `makeErrPromise` creates a promise that immediately returns an error.
+/// - `makeResultPromise` creates a promise that immediately returns a result.
+/// - `Future` more conveniently holds a promise or its result.
+/// - `PendingTask` wraps a promise as a pending task for execution.
+/// - `Executor` executes a pending task.
 ///
 /// Always look to the future; never look back.
 ///
 /// # Chaining promises using combinators
 ///
-/// `Promise`s can be chained together using combinators suchs as `then()` which consume the original promise and
+/// `Promise`s can be chained together using combinators such as `then()` which consume the original promise and
 /// return a new combined promise.
 ///
 /// For example, the `then()` combinator returns a promise that has the effect of asynchronously awaiting completion
-/// of the prior promise (the instance upon which `then()` was called) then delivering its result to a handle
+/// of the prior promise (the instance upon which `then()` was called) then delivering its result to a handler
 /// function.
 ///
 /// Available combinators:
 ///
-/// - `then()`
-/// - `andThen()`
+/// - `then()`: Invoked with the result (success or failure) of the previous promise.
+/// - `andThen()`: Invoked only on success. Propagates errors automatically.
+/// - `orElse()`: Invoked only on error. Propagates values automatically.
+/// - `inspect()`: Invoked with the result for side effects, without consuming or modifying the result.
+/// - `discard()`: Ignores the result and returns a successful void result.
 ///
 /// # Continuations and handlers
 ///
+/// Promises are built on "continuations". A continuation is a callable object (lambda, functor) that takes a
+/// `Context&` and returns a `Result<T, E>`.
+///
+/// Combinators like `then()` accept "handlers". Handlers are slightly more flexible than raw continuations:
+/// - They can optionally accept `Context&` as their first argument.
+/// - They accept the *value*, *error*, or *result* of the previous promise, depending on the combinator.
+/// - They return a value, a `Result`, or another `Promise`. The system automatically wraps values into `Ok` results.
+///
 /// # Boxed and unboxed promises
+///
+/// - **Unboxed (`PromiseImpl<SpecificType>`)**: Created by `makePromise` and combinators. The type of the promise
+///   depends on the type of the lambda/functor it holds. This avoids heap allocation and virtual calls (inlineable),
+///   but the types can get very complex and long.
+/// - **Boxed (`Promise<T, E>`)**: The alias `Promise` uses `std::move_only_function` (via type erasure). This
+///   provides a uniform type signature `Result<T, E>(Context&)` regardless of the underlying implementation.
+///   Boxing (via `.box()`) incurs a heap allocation and virtual dispatch but makes it easier to store promises in
+///   containers or return them from functions.
 ///
 /// # Single ownership model
 ///
+/// `PromiseImpl` is a move-only type. It cannot be copied. This enforces a single ownership model where a promise
+/// represents a unique task. When you attach a continuation via `then()`, the original promise is *moved* into the
+/// new promise. This ensures that a promise is consumed exactly once.
+///
 /// # Threading model
+///
+/// `Promise`s themselves are not thread-safe. They are designed to be driven by an `Executor` (via `Context`).
+/// - **Execution**: The `operator()(Context&)` method drives the promise. This should typically be called by the
+///   executor, potentially on different threads over time, but never concurrently on the same promise instance.
+/// - **Synchronization**: Since promises are single-owner and move-only, data races are naturally minimized. The
+///   executor is responsible for memory visibility when scheduling the task on different threads.
 ///
 /// # Result retention and Result
 ///
+/// A `Promise` computes a `Result`. Once computed, the `Promise` is effectively "used up".
+/// The `Future` class serves as a container that holds either the pending `Promise` or the completed `Result`.
+/// - When the promise completes, the `Future` transitions from `Pending` to `Ready`.
+/// - The `Result` is stored inside the `Future`.
+/// - You can extract the value/error using `takeValue()`/`takeError()`, which moves the data out and leaves the
+///   `Future` in an `Empty` state. Results are not retained indefinitely unless you store them.
+///
 /// # Clarification of nomenclature
+///
+/// - **Promise**: In this library, `Promise` (specifically `PromiseImpl`) represents the *computation* or the *task*
+///   itself (the "producer" logic). This is slightly different from `std::promise` (which is a setter) and closer
+///   to the Concept of a Task or a lazy Future.
+/// - **Future**: `Future` (specifically `FutureImpl`) is the *state container* (holder). It manages the state
+///   transitions (Pending -> Ready) and storage.
+/// - **Executor**: The entity responsible for calling the promise's continuation and scheduling suspensions.
 template <typename T = void, typename E = void>
 using Promise = PromiseImpl<std::move_only_function<Result<T, E>(Context&)>>;
 
@@ -191,8 +670,14 @@ public:
 
     /// Constructs/Assigns the promise by taking the continuation from another promise, leaving the other promise
     /// empty.
-    PromiseImpl(PromiseImpl&& rhs) noexcept = default;
-    PromiseImpl& operator=(PromiseImpl&& rhs) noexcept = default;
+    PromiseImpl(PromiseImpl&& rhs) noexcept : cont_(std::move(rhs.cont_)) {
+        rhs.cont_.reset();
+    }
+    PromiseImpl& operator=(PromiseImpl&& rhs) noexcept {
+        cont_ = std::move(rhs.cont_);
+        rhs.cont_.reset();
+        return *this;
+    }
 
     /// Discards the promise's continuation, leaving it empty.
     PromiseImpl& operator=(std::nullptr_t) {
@@ -214,6 +699,7 @@ public:
         return cont_.has_value();
     }
 
+    /// Swaps the promise's content with another.
     void swap(PromiseImpl& rhs) noexcept {
         std::swap(cont_, rhs.cont_);
     }
@@ -226,9 +712,10 @@ public:
     ///
     /// Once the continuation returns a ready result, the promise is assigned to an empty continuation.
     ///
-    /// It will throw `std::bad_optional_access` when the promise is empty.
+    /// The promise must be non-empty (checked by assert).
     ResultType operator()(Context& ctx) {
-        auto result = (cont_.value())(ctx);
+        assert(cont_.has_value());
+        auto result = (*cont_)(ctx);
         if (result) {
             cont_.reset();
         }
@@ -237,21 +724,60 @@ public:
 
     /// Takes the promise's continuation, leaving it in an empty state.
     ///
-    /// It will throw `std::bad_optional_access` when the promise is empty.
+    /// The promise must be non-empty (checked by assert).
     C takeContinuation() {
-        auto c = std::move(cont_.value());
+        assert(cont_.has_value());
+        auto c = std::move(*cont_);
         cont_.reset();
         return c;
     }
 
+    /// Returns a new promise that invokes the specified handler after this promise completes successfully.
+    ///
+    /// The handler receives the result of this promise.
+    ///
+    /// @code
+    /// makeOkPromise(1).then([](const Result<int>& result) {
+    ///     return Ok(result.value() + 1);
+    /// });
+    /// @endcode
     template <typename ResultHandler>
-    auto then(ResultHandler handler) {}
+    auto then(ResultHandler handler) {
+        return withContinuation(
+            internal::ThenContinuation<PromiseImpl, ResultHandler>(std::move(*this), std::move(handler)));
+    }
 
+    /// Returns a new promise that invokes the specified handler after this promise completes successfully with a value.
+    ///
+    /// The handler receives the value of this promise. If this promise fails, the error is propagated
+    /// and the handler is not invoked.
+    ///
+    /// @code
+    /// makeOkPromise(1).andThen([](const int& value) {
+    ///     return Ok(value + 1);
+    /// });
+    /// @endcode
     template <typename ValueHandler>
-    auto andThen(ValueHandler handler) {}
+    auto andThen(ValueHandler handler) {
+        return withContinuation(
+            internal::AndThenContinuation<PromiseImpl, ValueHandler>(std::move(*this), std::move(handler)));
+    }
 
+    /// Returns a new promise that invokes the specified handler after this promise completes with an error.
+    ///
+    /// The handler receives the error of this promise. If this promise succeeds, the value is propagated
+    /// and the handler is not invoked.
+    ///
+    /// @code
+    /// makeErrPromise(404).orElse([](const int& error) {
+    ///     return Ok(0); // Recover from error
+    /// });
+    /// @endcode
     template <typename ErrorHandler>
-    auto orElse(ErrorHandler handler) {}
+    auto orElse(ErrorHandler handler) {
+        return withContinuation(
+            internal::OrElseContinuation<PromiseImpl, ErrorHandler>(std::move(*this), std::move(handler)));
+    }
 
     /// Returns an unboxed promise which invokes the specified handler function after this promise completes
     /// (successfully or unsuccessfully), passing it the promise's result then delivering the result onwards to the next
@@ -282,9 +808,11 @@ public:
         return withContinuation(internal::DiscardContinuation<PromiseImpl>(std::move(*this)));
     }
 
-    // TODO
+    /// Wraps the promise using the provided wrapper.
+    ///
+    /// The wrapper must provide a `wrap(PromiseImpl, Args...)` method.
     template <typename Wrapper, typename... Args>
-    auto wrapWith(Wrapper& wrapper, Args&&... args) {
+    auto wrap(Wrapper& wrapper, Args&&... args) {
         return wrapper.wrap(std::move(*this), std::forward<Args>(args)...);
     }
 
@@ -309,12 +837,82 @@ public:
     }
 
 private:
+    // Helper function for creating other PromiseImpl<> types.
+    template <Continuation Other>
+    auto withContinuation(Other c) {
+        return PromiseImpl<Other>{std::move(c)};
+    }
+
     std::optional<C> cont_;
 };
 
 template <Continuation C>
 inline void swap(PromiseImpl<C>& lhs, PromiseImpl<C>& rhs) noexcept {
     lhs.swap(rhs);
+}
+
+template <typename Handler>
+inline auto makePromise(Handler handler) {
+    return PromiseImpl{internal::PromiseContinuation<Handler>(std::move(handler))};
+}
+
+/// Creates a promise that immediately returns a result.
+template <typename T = void, typename E = void>
+inline auto makeResultPromise(Result<T, E> result) {
+    return PromiseImpl{internal::ResultContinuation<T, E>(std::move(result))};
+}
+
+template <typename T = void, typename E = void>
+inline auto makeResultPromise(Ok<T> result) {
+    return PromiseImpl{internal::ResultContinuation<T, E>(std::move(result))};
+}
+
+template <typename T = void, typename E = void>
+inline auto makeResultPromise(Err<E> result) {
+    return PromiseImpl{internal::ResultContinuation<T, E>(std::move(result))};
+}
+
+template <typename T = void, typename E = void>
+inline auto makeResultPromise(Pending result) {
+    return PromiseImpl{internal::ResultContinuation<T, E>(std::move(result))};
+}
+
+/// Creates a promise that immediately returns a value.
+template <typename T>
+inline auto makeOkPromise(T value) {
+    return makeResultPromise<T, void>(Ok(std::move(value)));
+}
+
+inline auto makeOkPromise() {
+    return makeResultPromise<void, void>(Ok());
+}
+
+/// Creates a promise that immediately returns an error.
+template <typename E>
+inline auto makeErrPromise(E error) {
+    return makeResultPromise<void, E>(Err(std::move(error)));
+}
+
+inline auto makeErrPromise() {
+    return makeResultPromise<void, void>(Err());
+}
+
+/// Creates a promise that joins multiple promises.
+///
+/// The resulting promise completes when all input promises have completed successfully.
+/// The result is a tuple containing the results of each input promise in order.
+template <typename... Ps>
+auto joinPromises(Ps... promises) {
+    return PromiseImpl{internal::JoinContinuation<Ps...>(std::move(promises)...)};
+}
+
+/// Creates a promise that joins a vector of promises.
+///
+/// The resulting promise completes when all input promises have completed successfully.
+/// The result is a vector containing the results of each input promise in order.
+template <typename T, typename E>
+auto joinPromises(std::vector<Promise<T, E>> promises) {
+    return PromiseImpl{internal::JoinVectorContinuation<Promise<T, E>>(std::move(promises))};
 }
 
 /// The state of a future.
@@ -671,13 +1269,30 @@ inline void swap(FutureImpl<P>& lhs, FutureImpl<P>& rhs) noexcept {
     lhs.swap(rhs);
 }
 
-namespace internal {
-// Make a promise containing the specified continuation.
-template <Continuation C>
-PromiseImpl<C> withContinuation(C continuation) {
-    return PromiseImpl<C>(std::move(continuation));
-}
-} // namespace internal
+class PendingTask final {
+public:
+private:
+};
+
+class Context {
+public:
+    virtual ~Context() = default;
+
+    virtual Executor* executor() = 0;
+    virtual SuspendedTask suspend_task() = 0;
+};
+
+class Executor {
+public:
+    virtual ~Executor() = default;
+
+    virtual void schedule_task(PendingTask task) = 0;
+};
+
+class SuspendedTask final {
+public:
+private:
+};
 } // namespace hcomm
 
 #endif // HCOMM_PROMISE_PROMISE_HPP_
