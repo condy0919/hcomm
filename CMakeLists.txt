@@ -17,6 +17,7 @@ include(FetchContent)
 
 option(HCOMM_BUILD_TESTS "Build tests" OFF)
 option(HCOMM_BUILD_BENCHMARKS "Build benchmarks" OFF)
+option(HCOMM_ENABLE_COVERAGE "Enable code coverage" OFF)
 
 # Sources for the library are specified at the end
 add_library(hcomm "")
@@ -97,3 +98,44 @@ target_include_directories(hcomm PUBLIC
 
 ### Sources
 add_subdirectory(hcomm)
+
+### Coverage
+if(HCOMM_ENABLE_COVERAGE)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(STATUS "Building with coverage support")
+    target_compile_options(hcomm PUBLIC --coverage -g -O0)
+    target_link_options(hcomm PUBLIC --coverage)
+  else()
+    message(FATAL_ERROR "Coverage is only supported for GCC and Clang")
+  endif()
+
+  find_program(LCOV_PATH lcov)
+  find_program(GENHTML_PATH genhtml)
+
+  if(LCOV_PATH AND GENHTML_PATH)
+    add_custom_target(coverage
+      # 1. Zero counters
+      COMMAND ${LCOV_PATH} --directory . --zerocounters
+
+      # 2. Run tests
+      COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+
+      # 3. Capture coverage
+      COMMAND ${LCOV_PATH} --directory . --capture --output-file coverage.info --rc branch_coverage=1 --ignore-errors inconsistent,mismatch
+
+      # 4. Filter coverage (remove system headers, dependencies, and build artifacts)
+      COMMAND ${LCOV_PATH} --remove coverage.info '/usr/*' '*/_deps/*' '*/build/*' --output-file coverage_filtered.info --rc branch_coverage=1 --ignore-errors inconsistent,mismatch,unused
+
+      # 5. Generate HTML report
+      COMMAND ${GENHTML_PATH} coverage_filtered.info --output-directory coverage_report --rc branch_coverage=1 --ignore-errors inconsistent,mismatch,unused
+
+      # 6. Print success message
+      COMMAND ${CMAKE_COMMAND} -E echo "Coverage report generated in: ${CMAKE_BINARY_DIR}/coverage_report/index.html"
+
+      WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+      COMMENT "Generating code coverage report..."
+    )
+  else()
+    message(WARNING "lcov or genhtml not found. Coverage target will not be available.")
+  endif()
+endif()
