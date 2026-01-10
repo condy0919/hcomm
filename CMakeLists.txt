@@ -58,6 +58,8 @@ target_link_libraries(hcomm PUBLIC spdlog::spdlog)
 # boost
 include(${hcomm_SOURCE_DIR}/cmake/boost.cmake)
 target_link_libraries(hcomm PUBLIC Boost::callable_traits)
+target_link_libraries(hcomm PUBLIC Boost::container) # For static_vector, small_vector
+target_link_libraries(hcomm PUBLIC Boost::intrusive)
 
 # Benchmark
 if(HCOMM_BUILD_BENCHMARKS)
