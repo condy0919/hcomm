@@ -1163,7 +1163,7 @@ public:
     ///
     /// @param ctx The execution context.
     /// @return `true` if the future is Ready, `false` otherwise.
-    bool operator()(Context& ctx) {
+    [[nodiscard]] bool operator()(Context& ctx) {
         assert(!isEmpty() && "Cannot poll an empty Future");
         switch (state_.index()) {
         case 0:
@@ -1269,9 +1269,61 @@ inline void swap(FutureImpl<P>& lhs, FutureImpl<P>& rhs) noexcept {
     lhs.swap(rhs);
 }
 
+/// # Synopsis
+///
+/// `PendingTask` is a type-erased container for a top-level asynchronous task (a `Promise<void, void>`) that is
+/// ready to be executed by an `Executor`.
+///
+/// Unlike `Promise` or `Future`, which are designed for composition and chaining, `PendingTask` is the "end of the
+/// line" for a promise chain. It wraps the promise in a form that the executor can store, schedule, and invoke
+/// uniformly without knowing the specific type of the underlying promise.
+///
+/// # Lifecycle
+///
+/// 1. **Creation**: A `PendingTask` is typically created from a `Promise` (or `Future`'s promise) that has been
+///    finalized. The promise usually should have a result type of `void` (or the result is discarded).
+/// 2. **Scheduling**: The `PendingTask` is passed to an `Executor` (e.g., via `Executor::schedule()`).
+/// 3. **Execution**: The executor calls `operator()(Context&)` to drive the task.
+///    - Returns `false`: Task is still pending (suspended). Executor should reschedule it when it wakes up.
+///    - Returns `true`: Task completed. The `PendingTask` becomes empty.
+///
+/// # Thread Safety
+///
+/// `PendingTask` is a move-only type with single ownership. It is not thread-safe. The executor must ensure that
+/// a single `PendingTask` instance is not accessed concurrently. However, it can be moved between threads (e.g.,
+/// scheduled on a thread pool).
+///
+/// # Example
+///
+/// @code
+/// hcomm::Promise<> my_task = hcomm::makePromise([](hcomm::Context& ctx) { ... });
+/// executor.schedule(hcomm::PendingTask(std::move(my_task)));
+/// @endcode
 class PendingTask final {
 public:
+    PendingTask() = default;
+
+    PendingTask(Promise<> promise) : promise_(std::move(promise)) {}
+
+    template <Continuation C>
+    PendingTask(PromiseImpl<C> promise) : promise_(promise.discard().box()) {}
+
+    PendingTask(PendingTask&& rhs) noexcept = default;
+    PendingTask& operator=(PendingTask&& rhs) noexcept = default;
+
+    /// Returns if the pending task is non-empty (has a valid promise).
+    explicit operator bool() const {
+        return static_cast<bool>(promise_);
+    }
+
+    /// Evaluates the pending task. If the task completes (returning true), the task (actually promise) transitions to
+    /// the empty state. Calling an empty task is undefined.
+    [[nodiscard]] bool operator()(Context& ctx) {
+        return static_cast<bool>(promise_(ctx));
+    }
+
 private:
+    Promise<> promise_;
 };
 
 class Context {
@@ -1286,7 +1338,7 @@ class Executor {
 public:
     virtual ~Executor() = default;
 
-    virtual void schedule_task(PendingTask task) = 0;
+    virtual void schedule(PendingTask task) = 0;
 };
 
 class SuspendedTask final {
