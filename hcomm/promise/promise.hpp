@@ -1334,10 +1334,63 @@ public:
     virtual SuspendedTask suspend_task() = 0;
 };
 
+/// # Synopsis
+///
+/// An `Executor` is responsible for scheduling and executing `PendingTask`s. It abstracts the underlying execution
+/// strategy, which could be anything from a simple single-threaded loop to a complex thread pool or an event-driven
+/// reactor.
+///
+/// The executor acts as the engine of the asynchronous system. Promises define *what* needs to be done, and the
+/// executor determines *when* and *where* it is done.
+///
+/// # Key Responsibilities
+///
+/// 1.  **Scheduling**: Accepting tasks via `schedule(PendingTask task)` and storing them for execution.
+/// 2.  **Execution**: Driving tasks to completion by invoking `task(context)`. If a task suspends (returns `false`),
+///     the executor must ensure it is resumed later when it becomes ready (usually notified via `SuspendedTask`).
+/// 3.  **Context Provision**: Providing a `Context` to running tasks, which gives them access to the executor itself
+///     and mechanisms to suspend/resume.
+///
+/// # Thread Safety
+///
+/// - `schedule()`: Must be thread-safe. It can be called from any thread, including from within a running task
+///   (e.g., when a new task is spawned) or from an external event source (e.g., an IO completion handler).
+/// - **Execution**: The executor's run loop might be single-threaded or multi-threaded. It is the executor's
+///   responsibility to ensure memory visibility and avoid data races when scheduling tasks across threads.
+///
+/// # Lifecycle
+///
+/// An executor typically exists for the lifetime of the application or a specific subsystem. When the executor is
+/// destroyed, any pending tasks that have not completed are also destroyed (cancelled).
+///
+/// # Example (Concept)
+///
+/// @code
+/// class SimpleExecutor : public hcomm::Executor {
+/// public:
+///     void schedule(hcomm::PendingTask task) override {
+///         tasks_.push_back(std::move(task));
+///     }
+///
+///     void run() {
+///         while (!tasks_.empty()) {
+///             auto task = std::move(tasks_.front());
+///             tasks_.pop_front();
+///             if (!task(ctx_)) {
+///                 // Task suspended, should be rescheduled when ready...
+///                 // For simplicity, we might just drop it or re-queue it here.
+///             }
+///         }
+///     }
+///     // ...
+/// };
+/// @endcode
 class Executor {
 public:
+    /// Destroys the executor along with all of its remaining scheduled tasks that have yet to complete.
     virtual ~Executor() = default;
 
+    /// Schedules a task for eventually execution by the executor. This method is thread-safe.
     virtual void schedule(PendingTask task) = 0;
 };
 
