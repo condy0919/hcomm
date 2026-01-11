@@ -123,10 +123,10 @@ if(HCOMM_ENABLE_COVERAGE)
       COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
 
       # 3. Capture coverage
-      COMMAND ${LCOV_PATH} --directory . --capture --output-file coverage.info --rc branch_coverage=1 --ignore-errors inconsistent,mismatch
+      COMMAND ${LCOV_PATH} --directory . --capture --output-file coverage.info --rc branch_coverage=1 --ignore-errors inconsistent,inconsistent,mismatch,mismatch
 
       # 4. Filter coverage (remove system headers, dependencies, and build artifacts)
-      COMMAND ${LCOV_PATH} --remove coverage.info '/usr/*' '*/_deps/*' '*/build/*' --output-file coverage_filtered.info --rc branch_coverage=1 --ignore-errors inconsistent,mismatch,unused
+      COMMAND ${LCOV_PATH} --remove coverage.info '/usr/*' '*/_deps/*' '*/build/*' --output-file coverage_filtered.info --rc branch_coverage=1 --ignore-errors inconsistent,inconsistent,mismatch,mismatch,unused,unused,range
 
       # 5. Generate HTML report
       COMMAND ${GENHTML_PATH} coverage_filtered.info --output-directory coverage_report --rc branch_coverage=1 --ignore-errors inconsistent,mismatch,unused
