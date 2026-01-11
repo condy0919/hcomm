@@ -21,7 +21,7 @@ protected:
             return nullptr;
         }
 
-        hcomm::SuspendedTask suspend_task() override {
+        hcomm::Waker waker() override {
             std::unreachable();
         }
     };

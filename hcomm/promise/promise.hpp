@@ -17,7 +17,7 @@ namespace hcomm {
 // forward
 class Context;
 class Executor;
-class SuspendedTask;
+class Waker;
 
 template <typename C>
 concept Continuation = requires {
@@ -568,6 +568,7 @@ private:
 /// - `makeResultPromise` creates a promise that immediately returns a result.
 /// - `Future` more conveniently holds a promise or its result.
 /// - `PendingTask` wraps a promise as a pending task for execution.
+/// - `Waker` a handle to wake up a suspended task.
 /// - `Executor` executes a pending task.
 ///
 /// Always look to the future; never look back.
@@ -1284,7 +1285,7 @@ inline void swap(FutureImpl<P>& lhs, FutureImpl<P>& rhs) noexcept {
 ///    finalized. The promise usually should have a result type of `void` (or the result is discarded).
 /// 2. **Scheduling**: The `PendingTask` is passed to an `Executor` (e.g., via `Executor::schedule()`).
 /// 3. **Execution**: The executor calls `operator()(Context&)` to drive the task.
-///    - Returns `false`: Task is still pending (suspended). Executor should reschedule it when it wakes up.
+///    - Returns `false`: Task is still pending (suspended). Executor should reschedule it when notified by its `Waker`.
 ///    - Returns `true`: Task completed. The `PendingTask` becomes empty.
 ///
 /// # Thread Safety
@@ -1326,12 +1327,37 @@ private:
     Promise<> promise_;
 };
 
+/// # Synopsis
+///
+/// `Context` acts as the execution context for a running `Promise`. It is passed as an argument to every
+/// continuation invoked by the `Executor`.
+///
+/// The context serves two primary purposes:
+/// 1. **Access to the Environment**: It provides access to the `Executor` managing the task.
+/// 2. **Control Flow Management**: It provides mechanisms for the task to voluntarily suspend itself if it needs
+///    to wait for an external event (like I/O or a timer) before it can complete.
+///
+/// # Role in the System
+///
+/// In the `hcomm` promise model, tasks are cooperative. They run until they either complete (return a Result) or
+/// yield control (return `Pending`).
+///
+/// When a task needs to yield (return `Pending`), it usually needs to arrange for itself to be woken up later.
+/// The `waker()` method is the mechanism to obtain a `Waker` handle, which can then be stored in an
+/// event source (e.g., a reactor) to reschedule the task when ready.
 class Context {
 public:
     virtual ~Context() = default;
 
+    /// Returns the executor that is currently driving this task.
     virtual Executor* executor() = 0;
-    virtual SuspendedTask suspend_task() = 0;
+
+    /// Creates a handle to the currently executing task that allows it to be resumed later.
+    ///
+    /// This is typically called just before returning `Pending` from a continuation. The returned `Waker`
+    /// should be stored in a location (like an I/O reactor or timer wheel) that will trigger it when the
+    /// waiting condition is met.
+    virtual Waker waker() = 0;
 };
 
 /// # Synopsis
@@ -1347,7 +1373,7 @@ public:
 ///
 /// 1.  **Scheduling**: Accepting tasks via `schedule(PendingTask task)` and storing them for execution.
 /// 2.  **Execution**: Driving tasks to completion by invoking `task(context)`. If a task suspends (returns `false`),
-///     the executor must ensure it is resumed later when it becomes ready (usually notified via `SuspendedTask`).
+///     the executor must ensure it is resumed later when it becomes ready (usually notified via `Waker`).
 /// 3.  **Context Provision**: Providing a `Context` to running tasks, which gives them access to the executor itself
 ///     and mechanisms to suspend/resume.
 ///
@@ -1394,7 +1420,14 @@ public:
     virtual void schedule(PendingTask task) = 0;
 };
 
-class SuspendedTask final {
+/// # Synopsis
+///
+/// `Waker` is a lightweight, thread-safe handle to a suspended task. It allows an external event source (like an
+/// I/O reactor or a timer) to notify the `Executor` that the task is ready to make progress and should be
+/// rescheduled.
+///
+/// A `Waker` can be obtained from the `Context` using `context.waker()`.
+class Waker final {
 public:
 private:
 };
