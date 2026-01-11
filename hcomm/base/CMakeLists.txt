@@ -20,6 +20,7 @@ endif()
 if(HCOMM_BUILD_TESTS)
   add_executable(hcomm_base_test
     status_test.cpp
+    refptr_test.cpp
   )
   target_link_libraries(hcomm_base_test
     PRIVATE
