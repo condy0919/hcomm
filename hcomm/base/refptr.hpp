@@ -103,7 +103,7 @@ public:
 
     /// Constructor from raw pointer.
     /// Increments reference count.
-    explicit RefPtr(T* p) : ptr_(p) {
+    explicit RefPtr(T* p) noexcept : ptr_(p) {
         if (ptr_) {
             ptr_->ref();
         }
@@ -111,11 +111,11 @@ public:
 
     /// Constructor from raw pointer (adoption).
     /// Does NOT increment reference count.
-    RefPtr(T* p, internal::AdoptRefTag) : ptr_(p) {}
+    RefPtr(T* p, internal::AdoptRefTag) noexcept : ptr_(p) {}
 
     /// Copy constructor.
     /// Increments reference count.
-    RefPtr(const RefPtr& rhs) : ptr_(rhs.ptr_) {
+    RefPtr(const RefPtr& rhs) noexcept : ptr_(rhs.ptr_) {
         if (ptr_) {
             ptr_->ref();
         }
@@ -125,7 +125,7 @@ public:
     /// Increments reference count.
     template <typename U>
         requires std::convertible_to<U*, T*>
-    RefPtr(const RefPtr<U>& rhs) : ptr_(rhs.get()) {
+    RefPtr(const RefPtr<U>& rhs) noexcept : ptr_(rhs.get()) {
         if (ptr_) {
             ptr_->ref();
         }
@@ -145,7 +145,7 @@ public:
 
     /// Destructor.
     /// Decrements reference count if not null.
-    ~RefPtr() {
+    ~RefPtr() noexcept {
         if (ptr_) {
             ptr_->unref();
         }
@@ -154,7 +154,7 @@ public:
     // --- Assignment ---
 
     /// Copy assignment.
-    RefPtr& operator=(const RefPtr& rhs) {
+    RefPtr& operator=(const RefPtr& rhs) noexcept {
         RefPtr(rhs).swap(*this);
         return *this;
     }
@@ -162,7 +162,7 @@ public:
     /// Copy assignment (polymorphic).
     template <typename U>
         requires std::convertible_to<U*, T*>
-    RefPtr& operator=(const RefPtr<U>& rhs) {
+    RefPtr& operator=(const RefPtr<U>& rhs) noexcept {
         RefPtr(rhs).swap(*this);
         return *this;
     }
@@ -191,7 +191,7 @@ public:
 
     /// Resets the pointer to a new value (or nullptr).
     /// Decrements ref count of old object, increments ref count of new object.
-    void reset(T* p = nullptr) {
+    void reset(T* p = nullptr) noexcept {
         RefPtr(p).swap(*this);
     }
 
@@ -251,54 +251,54 @@ inline void swap(RefPtr<T>& lhs, RefPtr<T>& rhs) noexcept {
 
 // Comparison against RefPtr
 template <typename T, typename U>
-inline bool operator==(const RefPtr<T>& lhs, const RefPtr<U>& rhs) {
+inline bool operator==(const RefPtr<T>& lhs, const RefPtr<U>& rhs) noexcept {
     return lhs.get() == rhs.get();
 }
 
 template <typename T, typename U>
-inline bool operator!=(const RefPtr<T>& lhs, const RefPtr<U>& rhs) {
+inline bool operator!=(const RefPtr<T>& lhs, const RefPtr<U>& rhs) noexcept {
     return lhs.get() != rhs.get();
 }
 
 // Comparison against raw pointer
 template <typename T>
-inline bool operator==(const RefPtr<T>& lhs, const T* rhs) {
+inline bool operator==(const RefPtr<T>& lhs, const T* rhs) noexcept {
     return lhs.get() == rhs;
 }
 
 template <typename T>
-inline bool operator!=(const RefPtr<T>& lhs, const T* rhs) {
+inline bool operator!=(const RefPtr<T>& lhs, const T* rhs) noexcept {
     return lhs.get() != rhs;
 }
 
 template <typename T>
-inline bool operator==(const T* lhs, const RefPtr<T>& rhs) {
+inline bool operator==(const T* lhs, const RefPtr<T>& rhs) noexcept {
     return lhs == rhs.get();
 }
 
 template <typename T>
-inline bool operator!=(const T* lhs, const RefPtr<T>& rhs) {
+inline bool operator!=(const T* lhs, const RefPtr<T>& rhs) noexcept {
     return lhs != rhs.get();
 }
 
 // Comparison against nullptr
 template <typename T>
-inline bool operator==(const RefPtr<T>& lhs, std::nullptr_t) {
+inline bool operator==(const RefPtr<T>& lhs, std::nullptr_t) noexcept {
     return lhs.get() == nullptr;
 }
 
 template <typename T>
-inline bool operator!=(const RefPtr<T>& lhs, std::nullptr_t) {
+inline bool operator!=(const RefPtr<T>& lhs, std::nullptr_t) noexcept {
     return lhs.get() != nullptr;
 }
 
 template <typename T>
-inline bool operator==(std::nullptr_t, const RefPtr<T>& rhs) {
+inline bool operator==(std::nullptr_t, const RefPtr<T>& rhs) noexcept {
     return nullptr == rhs.get();
 }
 
 template <typename T>
-inline bool operator!=(std::nullptr_t, const RefPtr<T>& rhs) {
+inline bool operator!=(std::nullptr_t, const RefPtr<T>& rhs) noexcept {
     return nullptr != rhs.get();
 }
 
@@ -326,7 +326,7 @@ inline RefPtr<T> dynamic_pointer_cast(const RefPtr<U>& p) {
 
 /// Creates a new RefPtr<T> that takes ownership of a new T.
 template <typename T, typename... Args>
-RefPtr<T> make_ref(Args&&... args) {
+RefPtr<T> makeRef(Args&&... args) noexcept {
     return RefPtr<T>(new T(std::forward<Args>(args)...));
 }
 
