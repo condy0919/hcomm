@@ -20,6 +20,12 @@ class Context;
 class Executor;
 class Waker;
 
+/// A concept representing a continuation for a promise.
+///
+/// A continuation is a callable that:
+/// 1. Is move-constructible and move-assignable (to be carried by the `PromiseImpl`).
+/// 2. Accepts a `Context&` as an argument.
+/// 3. Returns a type that satisfies `IsResult` (i.e., `Result<T, E>` or similar).
 template <typename C>
 concept Continuation = requires {
     requires IsResult<std::invoke_result_t<C, Context&>>;
@@ -103,7 +109,7 @@ public:
 
     /// Invokes the handler and returns its Result.
     template <typename... Args>
-    ResultType operator()(Context& ctx, Args&&... args) {
+    ResultType operator()([[maybe_unused]] Context& ctx, Args&&... args) {
         return handler_(std::forward<Args>(args)...);
     }
 
@@ -287,7 +293,7 @@ public:
     ValueHandlerInvoker(Handler h) : adaptor_(std::move(h)) {}
 
     /// Invokes the handler with just Context (ignoring void value).
-    ResultType operator()(Context& ctx, R& result) {
+    ResultType operator()(Context& ctx, [[maybe_unused]] R& result) {
         return adaptor_(ctx);
     }
 
@@ -340,7 +346,7 @@ public:
     ErrorHandlerInvoker(Handler h) : adaptor_(std::move(h)) {}
 
     /// Invokes the handler with just Context (ignoring void error).
-    ResultType operator()(Context& ctx, R& result) {
+    ResultType operator()(Context& ctx, [[maybe_unused]] R& result) {
         return adaptor_(ctx);
     }
 
@@ -479,7 +485,7 @@ public:
     explicit ResultContinuation(Result<T, E> result) : result_(std::move(result)) {}
 
     /// Returns the stored result.
-    Result<T, E> operator()(Context& ctx) {
+    Result<T, E> operator()([[maybe_unused]] Context& ctx) {
         return std::move(result_);
     }
 
