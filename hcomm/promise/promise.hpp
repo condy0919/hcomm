@@ -10,6 +10,7 @@
 #include <type_traits>
 #include <variant>
 
+#include "hcomm/base/refptr.hpp"
 #include "hcomm/promise/result.hpp"
 #include <boost/callable_traits.hpp>
 
@@ -1416,8 +1417,15 @@ public:
     /// Destroys the executor along with all of its remaining scheduled tasks that have yet to complete.
     virtual ~Executor() = default;
 
-    /// Schedules a task for eventually execution by the executor. This method is thread-safe.
+    /// Schedules a task for eventual execution by the executor. This method is thread-safe.
     virtual void schedule(PendingTask task) = 0;
+};
+
+/// Users should inherit WakerImpl to define their own Waker.
+class WakerImpl : public RefCounted<WakerImpl> {
+public:
+    virtual ~WakerImpl() = default;
+    virtual void wake() = 0;
 };
 
 /// # Synopsis
@@ -1429,7 +1437,17 @@ public:
 /// A `Waker` can be obtained from the `Context` using `context.waker()`.
 class Waker final {
 public:
+    Waker() = default;
+    explicit Waker(RefPtr<WakerImpl> impl) : impl_(std::move(impl)) {}
+
+    void wake() const {
+        if (impl_) {
+            impl_->wake();
+        }
+    }
+
 private:
+    RefPtr<WakerImpl> impl_;
 };
 } // namespace hcomm
 
