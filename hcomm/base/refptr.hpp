@@ -14,6 +14,9 @@ struct AdoptRefTag {
 };
 } // namespace internal
 
+template <typename T>
+class RefPtr;
+
 /// Tag instance to request adoption of an existing reference (i.e., do not increment ref count).
 inline static constexpr internal::AdoptRefTag kAdoptRef{};
 
@@ -41,6 +44,10 @@ public:
 
     RefCounted& operator=(const RefCounted&) noexcept {
         return *this;
+    }
+
+    RefPtr<Derived> shared_from_this() {
+        return RefPtr<Derived>(static_cast<Derived*>(this));
     }
 
     /// Returns the current reference count.
@@ -85,10 +92,6 @@ private:
 /// `RefPtr` instances themselves are not thread-safe (like `std::shared_ptr`).
 /// The reference counting mechanism in `RefCounted` *is* thread-safe.
 template <typename T>
-    requires requires(T* p) {
-        p->ref();
-        p->unref();
-    }
 class RefPtr {
 public:
     using Type = T;
@@ -231,11 +234,7 @@ public:
     }
 
 private:
-    template <typename U>
-        requires requires(U* p) {
-            p->ref();
-            p->unref();
-        }
+    template <typename>
     friend class RefPtr;
 
     T* ptr_ = nullptr;
