@@ -4,7 +4,7 @@ include(FetchContent)
 
 FetchContent_Declare(
   umdk
-  GIT_REPOSITORY https://gitee.com/openeuler/umdk.git
+  GIT_REPOSITORY https://atomgit.com/openeuler/umdk.git
   GIT_TAG        br_openEuler_24.03_LTS_SP3
   GIT_SHALLOW    true
   GIT_PROGRESS   true
