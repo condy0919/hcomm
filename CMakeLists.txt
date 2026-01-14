@@ -35,7 +35,7 @@ target_compile_features(hcomm
 # Common GCC/Clang options
 target_compile_options(hcomm
   PRIVATE
-    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wconversion -Wsign-conversion>
 )
 
 ### Libraries
