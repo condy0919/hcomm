@@ -10,6 +10,7 @@ if(HCOMM_BUILD_TESTS)
     result_test.cpp
     promise_test.cpp
     single_threaded_executor_test.cpp
+    inline_executor_test.cpp
   )
   target_link_libraries(hcomm_promise_test
     PRIVATE
