@@ -9,6 +9,7 @@ if(HCOMM_BUILD_TESTS)
   add_executable(hcomm_promise_test
     result_test.cpp
     promise_test.cpp
+    bridge_test.cpp
     single_threaded_executor_test.cpp
     inline_executor_test.cpp
   )

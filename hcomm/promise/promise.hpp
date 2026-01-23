@@ -439,7 +439,7 @@ private:
 template <typename P, typename InspectHandler>
 class InspectContinuation {
 public:
-    InspectContinuation(P promise, InspectHandler handler)
+    InspectContinuation(P promise, MoveOnlyHandler<InspectHandler> handler)
         : promise_(std::move(promise)), handler_(std::move(handler)) {}
 
     /// Drives the promise and inspects the result if ready.
@@ -457,7 +457,7 @@ public:
 
 private:
     P promise_;
-    InspectHandler handler_;
+    MoveOnlyHandler<InspectHandler> handler_;
 };
 
 /// Continuation logic for `discard()`.
