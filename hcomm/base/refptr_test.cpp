@@ -195,4 +195,19 @@ TEST(RefPtrTest, NullptrCtor) {
     EXPECT_EQ(ptr.get(), nullptr);
 }
 
+TEST(RefPtrTest, AdoptStatic) {
+    int counter = 0;
+    TestObject* raw = new TestObject(&counter);
+    raw->ref(); // Manually ref to simulate an existing reference
+    EXPECT_EQ(raw->use_count(), 1);
+
+    {
+        // Adopt the reference using the static method
+        auto ptr = hcomm::RefPtr<TestObject>::adopt(raw);
+        EXPECT_EQ(ptr->use_count(), 1); // Should not increment ref count
+    }
+    // ptr goes out of scope, unref() is called, object should be deleted
+    EXPECT_EQ(counter, 0);
+}
+
 } // namespace

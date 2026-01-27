@@ -206,6 +206,13 @@ public:
         return temp;
     }
 
+    /// Adopts an existing reference from a raw pointer.
+    /// Creates a new `RefPtr` that takes ownership of a `raw` pointer without incrementing its reference count. This
+    /// is useful when an API (e.g., ibv_poll_cq) gives you a raw pointer with a reference count already incremented.
+    static RefPtr adopt(T* raw) noexcept {
+        return RefPtr(raw, kAdoptRef);
+    }
+
     /// Swaps the managed pointer with another RefPtr.
     void swap(RefPtr& rhs) noexcept {
         std::swap(ptr_, rhs.ptr_);
