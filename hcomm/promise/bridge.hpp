@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 
-#include <mutex>
+#include <cassert>
 #include <utility>
 
 #include "hcomm/base/refptr.hpp"
@@ -15,6 +15,18 @@ Bridge<T, E> makeBridge();
 
 namespace internal {
 /// Represents the shared state between a `Completer` and a `Consumer`.
+///
+///                   -- producer drops --> [ Abandoned ]
+///                  /
+///                 /--- consumer drops --> [ Cancelled ]
+///                /
+/// [ Pending ] ---+--------------------------------------- producer completes ----------+
+///                \                                                                     |
+///                 \                                                                    v
+///                  +--- consumer waits --> [ Waiting ] -- producer completes --> [ Completed ] --+
+///                                                                                                |
+///                                                                                                v
+///                                                                                           [ Consumed ]
 enum class SharedState : std::uint8_t {
     /// The initial state. The `Completer` has not yet provided a result, and the `Consumer` has not yet dropped.
     Pending,
@@ -24,7 +36,10 @@ enum class SharedState : std::uint8_t {
     Completed,
     /// The `Consumer` was dropped without consuming the result.
     Cancelled,
-    /// The `Consumer` has taken the result. This is a terminal state.
+    /// The `Consumer` was waiting for the result.
+    Waiting,
+    /// The `Consumer` has taken the result. This is a conceptual terminal state; the state variable is not set to this
+    /// value. It is implied when the result is moved out of the `SharedCore`.
     Consumed,
 };
 
@@ -40,14 +55,12 @@ public:
 
     /// Returns `true` if the consumer has cancelled the operation.
     bool cancelled() const {
-        std::lock_guard lock(mtx_);
-        return state_ == SharedState::Cancelled;
+        return state_.load(std::memory_order_relaxed) == SharedState::Cancelled;
     }
 
     /// Returns `true` if the completer has abandoned the operation.
     bool abandoned() const {
-        std::lock_guard lock(mtx_);
-        return state_ == SharedState::Abandoned;
+        return state_.load(std::memory_order_relaxed) == SharedState::Abandoned;
     }
 
     /// Abandons the operation from the completer's side.
@@ -55,33 +68,44 @@ public:
     /// This is called when the `Completer` is destroyed without providing a result. The state transitions from
     /// `Pending` to `Abandoned`.
     void abandon() {
-        std::lock_guard lock(mtx_);
-        if (state_ == SharedState::Pending) {
-            state_ = SharedState::Abandoned;
-        }
+        auto expected = SharedState::Pending;
+        state_.compare_exchange_strong(expected, SharedState::Abandoned, std::memory_order_acq_rel);
     }
 
     /// Completes the operation with a result.
     ///
-    /// Stores the result and wakes the waiting consumer. The state transitions from `Pending` to `Completed`.
-    /// The consumer.promise() may have already determined the state as pending, making waker_ valid and requiring
+    /// Stores the result and wakes the waiting consumer. The state transitions from `Pending/Waiting` to `Completed`.
+    /// The consumer.promise() may have already determined the state as Waiting, making waker_ valid and requiring
     /// waker_.wake() to notify the consumer upon completion.
     void complete(Result<T, E> result) {
-        Waker waker;
-        bool should_wake = false;
-        {
-            std::lock_guard lock(mtx_);
-            if (state_ == SharedState::Pending) {
-                state_ = SharedState::Completed;
+        const auto current = state_.load(std::memory_order_relaxed);
+        assert(current == SharedState::Pending || current == SharedState::Waiting || current == SharedState::Cancelled);
 
-                should_wake = true;
-                result_ = std::move(result);
-                waker = std::move(waker_);
-            }
-        }
+        // The completion logic is carefully ordered to prevent race conditions
+        // with the consumer in `await`.
 
-        if (should_wake) {
-            waker.wake();
+        // 1. Store the result. This write is not atomic but is safe. The consumer is guaranteed not to read `result_`
+        //    until it has observed the `Completed` state, which happens after the release fence in step 2.
+        result_ = std::move(result);
+
+        // 2. Atomically update the state to `Completed`. This operation uses an acquire-release memory ordering to
+        //    create a synchronization point with `await`.
+        //
+        //    - `release`: Ensures that the write to `result_` (step 1) is visible to any thread that performs an
+        //      `acquire` operation on `state_` and sees the value `Completed`.
+        //
+        //    - `acquire`: Ensures that if we see a `Waiting` state, we also see the write to `waker_` that happened in
+        //      `await` before it set the `Waiting` state.
+        SharedState old = state_.exchange(SharedState::Completed, std::memory_order_acq_rel);
+
+        // 3. Wake the consumer only if it was actually waiting. If the previous state was `Waiting`, it means the
+        //    consumer has registered its waker and is expecting to be woken up. If the state was `Pending`, the
+        //    consumer hasn't yet reached the point of waiting, and it will observe the `Completed` state itself in
+        //    `await`.
+        if (old == SharedState::Waiting) {
+            // The `acquire` on the `exchange` above ensures that we have visibility of the `waker_` that was written
+            // by the consumer thread before it transitioned to `Waiting`.
+            waker_.wake();
         }
     }
 
@@ -90,10 +114,8 @@ public:
     /// This is called when the `Consumer` is destroyed without taking the result. The state transitions from `Pending`
     /// to `Cancelled`.
     void cancel() {
-        std::lock_guard lock(mtx_);
-        if (state_ == SharedState::Pending) {
-            state_ = SharedState::Cancelled;
-        }
+        auto expected = SharedState::Pending;
+        state_.compare_exchange_strong(expected, SharedState::Cancelled, std::memory_order_acq_rel);
     }
 
     /// Sets a default result if the completer abandons the operation (without providing a result).
@@ -102,9 +124,9 @@ public:
     /// If the state is `Pending`, this result acts as a default and can be overridden by a subsequent completion
     /// from the completer. If the state is `Abandoned`, this result will be returned by `await()`.
     void setDefaultResult(Result<T, E> result) {
-        std::lock_guard lock(mtx_);
-        if (state_ == SharedState::Pending || state_ == SharedState::Abandoned) {
-            result_.swap(result);
+        auto current = state_.load(std::memory_order_relaxed);
+        if (current == SharedState::Pending || current == SharedState::Abandoned) {
+            result_ = std::move(result);
         }
     }
 
@@ -115,27 +137,81 @@ public:
     /// transitions the state to `Consumed`.
     ///
     /// If the `Completer` was abandoned, this will return the default `Result` (which is `Pending{}`) unless
-    /// `promiseOr` was used to provide a different result.
+    /// `promiseOr` was used to provide a default result.
     Result<T, E> await(Context& ctx) {
-        std::lock_guard lock(mtx_);
-        if (state_ == SharedState::Pending) {
+        auto current = state_.load(std::memory_order_relaxed);
+        assert(current == SharedState::Abandoned || current == SharedState::Pending ||
+               current == SharedState::Completed);
+
+        if (current == SharedState::Pending) {
+            // State is Pending, so the result is not ready yet. We need to prepare to go to sleep (by returning
+            // Pending{}), but we must first register our waker so the producer can wake us up.
+
+            // 1. Register the waker from the current async context.
             waker_ = ctx.waker();
-            return Pending{};
+
+            // 2. Try to transition from `Pending` to `Waiting`. This is the critical step. `acq_rel` is used:
+            //
+            //    - `release`: Makes our write to `waker_` visible to the producer if it reads `Waiting`.
+            //
+            //    - `acquire`: If the CAS fails because the state is now `Completed`, we need to see the producer's
+            //      write to `result_`.
+            if (state_.compare_exchange_strong(current, SharedState::Waiting, std::memory_order_acq_rel)) {
+                // --- Success Case ---
+                //
+                // The state is now `Waiting`. We can safely return `Pending` and go to sleep. The producer is now
+                // responsible for waking us.
+                return Pending{};
+            }
+
+            // --- Failure Case (the interesting part) ---
+            //
+            // The CAS failed! This means `state_` was NOT `Pending` when we tried to change it.
+            // `compare_exchange_strong` has updated our `current` variable with the new state that caused the failure.
+            // This happens if the producer completed the promise *just* after we loaded `Pending` but *before* we
+            // could set it to `Waiting`.
+            //
+            // Timeline of this race:
+            //
+            //   Consumer (`await`)                   Producer (`complete`)
+            //   -------------------                  ---------------------
+            //   load() sees `Pending`
+            //   waker_ = ...
+            //                                        result_ = ...
+            //                                        exchange() sets `Completed`
+            //                                        sees old state `Pending`, doesn't wake
+            //   cas(Pending->Waiting) fails
+            //   `current` is now `Completed`
+            //
+            //   We have successfully avoided a lost wakeup.
+
+            // 3. Check the new state.
+            //
+            //    If it's `Completed` or `Abandoned`, the result is now available. The `acquire` part of our failed
+            //    `compare_exchange_strong` ensures we can safely read `result_`.
+            if (current == SharedState::Completed || current == SharedState::Abandoned) {
+                // The producer finished its work in the small window before we could go to sleep. No need to be woken
+                // up, just take the result.
+                return std::move(result_);
+            }
         }
 
-        state_ = SharedState::Consumed;
+        assert(current == SharedState::Abandoned || current == SharedState::Completed);
+        // The result was already `Completed` or `Abandoned` when we first checked. We can just take the result and
+        // move on.
+        // The state is `Completed` or `Abandoned`. We take ownership of the result and transition to a terminal
+        // `Consumed` state is implied by moving the result. Note: The actual state variable is not changed to
+        // `Consumed` here, this is a conceptual final state.
         return std::move(result_);
     }
 
 private:
-    mutable std::mutex mtx_;
+    std::atomic<SharedState> state_{SharedState::Pending};
 
-    SharedState state_ = SharedState::Pending;
-
-    // valid if state is pending and `await`ed.
+    // valid if state is Waiting.
     Waker waker_;
 
-    // valid if the state is Completed, or if it is Abandoned/Pending and `promiseOr` was used.
+    // valid if the state is Completed/Abandoned, or if it is Abandoned/Pending and `promiseOr` was used.
     Result<T, E> result_;
 };
 
@@ -171,13 +247,10 @@ private:
 
 /// Provides a result to complete an asynchronous task.
 ///
-/// A `Completer` is the producer side of a single-producer, single-consumer channel. It holds the unique capability to
-/// complete the associated `Consumer` with a result. This capability must be exercised at most once.
+/// A `Completer` is the "producer" half of a single-producer, single-consumer channel, paired with a `Consumer`. It
+/// holds the unique capability to set the result of the operation, which can be done at most once.
 ///
-/// Ownership of this capability is implicitly transferred away when the completer is abandoned (either explicitly via
-/// `abandon()` or by destruction) or completed (via `completeOk`, `completeErr`, or `completeResult`).
-///
-/// A `Completer` is invalid after the capability has been exercised.
+/// Once a `Completer` is used to complete, abandon, or is destroyed, it becomes invalid and cannot be used again.
 ///
 /// This is a move-only type.
 ///
@@ -286,13 +359,11 @@ private:
 
 /// Consumes the result of an asynchronous task.
 ///
-/// A `Consumer` is the consuming side of a single-producer, single-consumer channel. It holds the unique capability to
-/// receive the result from the associated `Completer`.
+/// A `Consumer` is the "consumer" half of a single-producer, single-consumer channel, paired with a `Completer`. It
+/// holds the unique capability to retrieve the result of the operation.
 ///
-/// Ownership of this capability is implicitly transferred away when the task is cancelled (either explicitly via
-/// `cancel()` or by destruction) or when the `Consumer` is converted into a `Promise`.
-///
-/// A `Consumer` is invalid after the capability has been exercised.
+/// This capability is exercised by converting the `Consumer` into a `Promise` via `promise()` or `promiseOr()`. Once
+/// this is done, or if the `Consumer` is cancelled or destroyed, it becomes invalid and cannot be used again.
 ///
 /// This is a move-only type.
 ///
@@ -368,26 +439,33 @@ struct Bridge {
     Consumer<T, E> consumer;
 };
 
-/// Creates a bridge, which is a connected pair of `Completer` and `Consumer`.
+/// Creates a connected `Completer` and `Consumer` pair.
 ///
-/// The `Completer`/`Consumer` pair is analogous to the `std::promise`/`std::future` pair from the C++11 standard
-/// library, but adapted for this promise framework.
+/// This pair, known as a `Bridge`, is the fundamental mechanism for creating a new `Promise` whose result can be
+/// provided asynchronously. It is the analogue to `std::promise` and `std::future`.
 ///
-/// The producer receives the `Completer` object, and the consumer receives the `Consumer` object.
-///
-/// The `Completer` is used to provide the result (or signal an error or abandonment) of an asynchronous operation.
-/// The `Consumer` is used to retrieve the result, typically by converting it into a `Promise`.
-///
-/// The two are linked by a shared state, ensuring that the result is passed from the completer to the consumer
-/// exactly once.
+/// The producer receives the `Completer` to eventually provide a result, and the consumer receives the `Consumer`,
+/// which can be turned into a `Promise` to await that result.
 template <typename T = void, typename E = void>
 Bridge<T, E> makeBridge() {
     auto core = makeRef<internal::SharedCore<T, E>>();
     return {Completer<T, E>(core), Consumer<T, E>(core)};
 }
 
+/// Schedules a promise to be resolved on an executor and returns a `Consumer` for its result.
+///
+/// This function acts as a bridge between different asynchronous contexts. It schedules the given `promise` to run on
+/// the specified `Executor`. When the original promise completes, its result is used to complete the `Consumer`
+/// returned by this function.
+///
+/// This is useful for transferring the result of a computation from one executor to another, or for creating a
+/// `Promise` that can be awaited in the current context while the work happens elsewhere.
+///
+/// @param exec The executor on which to schedule the promise.
+/// @param promise The promise to execute.
+/// @return A `Consumer` that will be completed with the result of the input promise.
 template <Continuation C, typename P = PromiseImpl<C>>
-Consumer<typename P::ValueType, typename P::ErrorType> scheduleFor(Executor* exec, PromiseImpl<C> promise) {
+auto scheduleFor(Executor* exec, PromiseImpl<C> promise) -> Consumer<typename P::ValueType, typename P::ErrorType> {
     assert(exec);
     assert(promise);
 
