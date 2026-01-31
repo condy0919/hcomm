@@ -117,6 +117,28 @@ private:
     MoveOnlyHandler<Handler> handler_;
 };
 
+/// Specialization for handlers returning void.
+template <typename Handler>
+class ResultAdaptor<Handler, void> {
+public:
+    using ResultType = Result<>;
+
+    ResultAdaptor(MoveOnlyHandler<Handler> h) : handler_(std::move(h)) {}
+
+    ResultAdaptor(ResultAdaptor&& rhs) noexcept = default;
+    ResultAdaptor& operator=(ResultAdaptor&& rhs) noexcept = default;
+
+    /// Invokes the handler and return it's Result.
+    template <typename... Args>
+    ResultType operator()([[maybe_unused]] Context& ctx, Args&&... args) {
+        handler_(std::forward<Args>(args)...);
+        return Ok();
+    }
+
+private:
+    MoveOnlyHandler<Handler> handler_;
+};
+
 /// Specialization for handlers returning a Continuation.
 template <typename Handler, Continuation C>
 class ResultAdaptor<Handler, C> {
@@ -820,7 +842,7 @@ public:
     ///
     /// The wrapper must provide a `wrap(PromiseImpl, Args...)` method.
     template <typename Wrapper, typename... Args>
-    auto wrap(Wrapper& wrapper, Args&&... args) {
+    auto with(Wrapper& wrapper, Args&&... args) {
         return wrapper.wrap(std::move(*this), std::forward<Args>(args)...);
     }
 
