@@ -29,12 +29,12 @@ inline static constexpr internal::AdoptRefTag kAdoptRef{};
 ///
 /// Inherit publicly from `RefCounted<YourClass>`. Ensure `YourClass` allows `RefCounted` to delete it.
 ///
-/// @code
+/// ```cpp
 /// class MyObject : public hcomm::RefCounted<MyObject> {
 /// public:
 ///     void doSomething() {}
 /// };
-/// @endcode
+/// ```
 template <typename Derived>
 class RefCounted {
 public:

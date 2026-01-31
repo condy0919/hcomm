@@ -766,11 +766,11 @@ public:
     ///
     /// The handler receives the result of this promise.
     ///
-    /// @code
+    /// ```cpp
     /// makeOkPromise(1).then([](const Result<int>& result) {
     ///     return Ok(result.value() + 1);
     /// });
-    /// @endcode
+    /// ```
     template <typename ResultHandler>
     auto then(ResultHandler handler) {
         return withContinuation(
@@ -782,11 +782,11 @@ public:
     /// The handler receives the value of this promise. If this promise fails, the error is propagated
     /// and the handler is not invoked.
     ///
-    /// @code
+    /// ```cpp
     /// makeOkPromise(1).andThen([](const int& value) {
     ///     return Ok(value + 1);
     /// });
-    /// @endcode
+    /// ```
     template <typename ValueHandler>
     auto andThen(ValueHandler handler) {
         return withContinuation(
@@ -798,11 +798,11 @@ public:
     /// The handler receives the error of this promise. If this promise succeeds, the value is propagated
     /// and the handler is not invoked.
     ///
-    /// @code
+    /// ```cpp
     /// makeErrPromise(404).orElse([](const int& error) {
     ///     return Ok(0); // Recover from error
     /// });
-    /// @endcode
+    /// ```
     template <typename ErrorHandler>
     auto orElse(ErrorHandler handler) {
         return withContinuation(
@@ -1035,7 +1035,7 @@ enum class FutureState : std::uint8_t {
 ///
 /// # Example
 ///
-/// @code
+/// ```cpp
 /// #include "hcomm/promise/promise.hpp"
 ///
 /// void example(hcomm::Context& ctx) {
@@ -1060,7 +1060,7 @@ enum class FutureState : std::uint8_t {
 ///         assert(future.isEmpty());
 ///     }
 /// }
-/// @endcode
+/// ```
 template <typename T = void, typename E = void>
 using Future = FutureImpl<Promise<T, E>>;
 
@@ -1184,15 +1184,17 @@ public:
         return state_.index() == 2;
     }
 
-    /// Drives the future's execution by polling the underlying promise.
+    /// Drives the future's execution by polling the underlying promise using
+    /// the provided execution `ctx`.
     ///
     /// - If the future is Pending, it invokes the promise.
-    ///   - The promise returns a Result, the future transitions to Ready and returns `true`.
-    ///   - The promise returns Pending, the future remains Pending and returns `false`.
+    ///   - If the promise returns a Result, the future transitions to Ready
+    ///     and this method returns `true`.
+    ///   - If the promise returns Pending, the future remains Pending and
+    ///     this method returns `false`.
     /// - If the future is already Ready, returns `true`.
     ///
-    /// @param ctx The execution context.
-    /// @return `true` if the future is Ready, `false` otherwise.
+    /// Returns `true` if the future is Ready, `false` otherwise.
     [[nodiscard]] bool operator()(Context& ctx) {
         assert(!isEmpty() && "Cannot poll an empty Future");
         switch (state_.index()) {
@@ -1325,10 +1327,10 @@ inline void swap(FutureImpl<P>& lhs, FutureImpl<P>& rhs) noexcept {
 ///
 /// # Example
 ///
-/// @code
+/// ```cpp
 /// hcomm::Promise<> my_task = hcomm::makePromise([](hcomm::Context& ctx) { ... });
 /// executor.schedule(hcomm::PendingTask(std::move(my_task)));
-/// @endcode
+/// ```
 class PendingTask final {
 public:
     PendingTask() = default;
@@ -1420,7 +1422,7 @@ public:
 ///
 /// # Example (Concept)
 ///
-/// @code
+/// ```cpp
 /// class SimpleExecutor : public hcomm::Executor {
 /// public:
 ///     void schedule(hcomm::PendingTask task) override {
@@ -1439,7 +1441,7 @@ public:
 ///     }
 ///     // ...
 /// };
-/// @endcode
+/// ```
 class Executor {
 public:
     /// Destroys the executor along with all of its remaining scheduled tasks that have yet to complete.

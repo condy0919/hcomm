@@ -46,8 +46,7 @@ public:
 
     /// Runs the task.
     ///
-    /// Invokes the underlying `PendingTask`.
-    /// @return `true` if the task completed, `false` if it suspended (pending).
+    /// Invokes the underlying `PendingTask` and returns `true` if the task completed, or `false` if it suspended.
     bool run() {
         return task_(*this);
     }

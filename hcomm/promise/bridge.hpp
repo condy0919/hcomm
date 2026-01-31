@@ -456,14 +456,13 @@ Bridge<T, E> makeBridge() {
 ///
 /// This function acts as a bridge between different asynchronous contexts. It schedules the given `promise` to run on
 /// the specified `Executor`. When the original promise completes, its result is used to complete the `Consumer`
-/// returned by this function.
+/// that is returned by this function.
 ///
 /// This is useful for transferring the result of a computation from one executor to another, or for creating a
 /// `Promise` that can be awaited in the current context while the work happens elsewhere.
 ///
-/// @param exec The executor on which to schedule the promise.
-/// @param promise The promise to execute.
-/// @return A `Consumer` that will be completed with the result of the input promise.
+/// The function takes an `exec` executor to schedule the `promise` on. It returns a `Consumer` that will be
+/// completed with the result of the input promise.
 template <Continuation C, typename P = PromiseImpl<C>>
 auto scheduleFor(Executor* exec, PromiseImpl<C> promise) -> Consumer<typename P::ValueType, typename P::ErrorType> {
     assert(exec);

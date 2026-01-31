@@ -181,10 +181,10 @@ public:
     /// Requires the `Result` to be in the `Ok` state.
     ///
     /// Example:
-    /// @code
+    /// ```cpp
     /// Result<int> res = Ok(42);
     /// int v = res.value();
-    /// @endcode
+    /// ```
     template <typename Self>
         requires(!std::is_void_v<T>)
     decltype(auto) value(this Self&& self) {
@@ -194,10 +194,10 @@ public:
     /// Returns the contained value if `Ok`, otherwise returns `default_value`.
     ///
     /// Example:
-    /// @code
+    /// ```cpp
     /// Result<int> res = Pending{};
     /// int v = res.valueOr(10); // v is 10
-    /// @endcode
+    /// ```
     template <typename Self, typename U>
         requires(!std::is_void_v<T>)
     T valueOr(this Self&& self, U&& default_value) {
@@ -246,11 +246,11 @@ public:
     /// If the result is `Pending` or `Err`, the function returns the original state unchanged.
     ///
     /// Example:
-    /// @code
+    /// ```cpp
     /// Result<int, std::string> res = Ok(10);
     /// auto s = res.map([](int i) { return std::to_string(i); });
     /// // s is Ok("10")
-    /// @endcode
+    /// ```
     template <typename Self, typename F,
               typename U =
                   typename std::conditional_t<std::is_void_v<T>, std::invoke_result<F>, std::invoke_result<F, T>>::type>
@@ -288,11 +288,11 @@ public:
     /// If the result is `Ok` or `Pending`, the function returns the original state unchanged.
     ///
     /// Example:
-    /// @code
+    /// ```cpp
     /// Result<int, int> res = Err(404);
     /// auto s = res.mapErr([](int e) { return "Error " + std::to_string(e); });
     /// // s is Err("Error 404")
-    /// @endcode
+    /// ```
     template <typename Self, typename F,
               typename U =
                   typename std::conditional_t<std::is_void_v<E>, std::invoke_result<F>, std::invoke_result<F, E>>::type>
@@ -331,11 +331,11 @@ public:
     /// the function is not executed, and the current state is propagated.
     ///
     /// Example:
-    /// @code
+    /// ```cpp
     /// Result<int> res = Ok(21);
     /// auto next = res.andThen([](int val) -> Result<int> { return Ok(val * 2); });
     /// // next is Ok(42)
-    /// @endcode
+    /// ```
     template <typename Self, typename F,
               typename Ret =
                   typename std::conditional_t<std::is_void_v<T>, std::invoke_result<F>, std::invoke_result<F, T>>::type>
@@ -365,11 +365,11 @@ public:
     /// the function is not executed, and the current state is propagated.
     ///
     /// Example:
-    /// @code
+    /// ```cpp
     /// Result<int, std::string> res = Err("fail");
     /// auto recovered = res.orElse([](const std::string&) -> Result<int, std::string> { return Ok(0); });
     /// // recovered is Ok(0)
-    /// @endcode
+    /// ```
     template <typename Self, typename F,
               typename Ret =
                   typename std::conditional_t<std::is_void_v<E>, std::invoke_result<F>, std::invoke_result<F, E>>::type>
