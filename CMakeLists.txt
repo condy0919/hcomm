@@ -126,7 +126,7 @@ if(HCOMM_ENABLE_COVERAGE)
       COMMAND ${LCOV_PATH} --directory . --capture --output-file coverage.info --rc branch_coverage=1 --ignore-errors inconsistent,inconsistent,mismatch,mismatch
 
       # 4. Filter coverage (remove system headers, dependencies, and build artifacts)
-      COMMAND ${LCOV_PATH} --remove coverage.info '/usr/*' '*/_deps/*' '*/build/*' --output-file coverage_filtered.info --rc branch_coverage=1 --ignore-errors inconsistent,inconsistent,mismatch,mismatch,unused,unused,range
+      COMMAND ${LCOV_PATH} --remove coverage.info '/usr/*' '*/_deps/*' '*/build/*' '*/hcomm/*_test.cpp' --output-file coverage_filtered.info --rc branch_coverage=1 --ignore-errors inconsistent,inconsistent,mismatch,mismatch,unused,unused,range
 
       # 5. Generate HTML report
       COMMAND ${GENHTML_PATH} coverage_filtered.info --output-directory coverage_report --rc branch_coverage=1 --ignore-errors inconsistent,mismatch,unused
