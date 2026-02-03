@@ -3,19 +3,23 @@
 #ifndef HCOMM_TRANSPORT_UB_ERROR_HPP_
 #define HCOMM_TRANSPORT_UB_ERROR_HPP_
 
+#include <cstdint>
+
 namespace hcomm {
 namespace ub {
-enum class Error {
-    SyscallError = 1,
+enum class Error : std::uint32_t {
+    Syscall = 1,
 
     // URMA
-    CreateJettyFailed,
-    CreateJfrFailed,
-    CreateJfceFailed,
-    CreateJfcFailed,
-    RearmJfcFailed,
-    ImportJettyFailed,
-    BindJettyFailed,
+    CreateJetty,
+    CreateJfr,
+    CreateJfce,
+    CreateJfc,
+    RearmJfc,
+    ImportJetty,
+    BindJetty,
+    DeviceNotFound,
+    QueryDevice,
 
     // hcomm
     AlreadyBind,
