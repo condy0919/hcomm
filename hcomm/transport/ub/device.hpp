@@ -3,6 +3,7 @@
 #ifndef HCOMM_TRANSPORT_UB_DEVICE_HPP_
 #define HCOMM_TRANSPORT_UB_DEVICE_HPP_
 
+#include <cstring>
 #include <variant>
 
 #include <urma_types.h>
@@ -12,6 +13,11 @@ namespace ub {
 /// Represents a URMA device through its name and the eid_idx. This combination is used to uniquely designate a
 /// specific physical or virtual communication device on the system, facilitating device-specific operations.
 struct DeviceIndex {
+    DeviceIndex(const char* s, std::uint32_t i) {
+        std::strncpy(name, s, URMA_MAX_NAME - 1);
+        idx = i;
+    }
+
     /// The textual identifier for the device.
     char name[URMA_MAX_NAME];
     /// The eid_idx
@@ -24,6 +30,7 @@ struct DeviceIndex {
 /// This class leverages `std::variant` to abstract these distinct identification mechanisms under a unified interface.
 class DeviceInfo {
 public:
+    // Use `urma_str_to_eid()` to convert string to `urma_eid_t`.
     DeviceInfo(urma_eid_t eid) : info_(eid) {}
 
     DeviceInfo(DeviceIndex idx) : info_(idx) {}
