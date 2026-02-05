@@ -22,6 +22,7 @@ if(HCOMM_BUILD_TESTS)
     status_test.cpp
     refptr_test.cpp
     weakptr_test.cpp
+    scope_exit_test.cpp
   )
   target_link_libraries(hcomm_base_test
     PRIVATE
