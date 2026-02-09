@@ -13,13 +13,9 @@ namespace hcomm {
 /// resource leaks.
 class UniqueFd {
 public:
-    explicit UniqueFd(int fd) : fd_(fd) {}
+    UniqueFd() = default;
 
-    ~UniqueFd() {
-        if (fd_ >= 0) {
-            ::close(fd_);
-        }
-    }
+    explicit UniqueFd(int fd) : fd_(fd) {}
 
     UniqueFd(UniqueFd&& rhs) noexcept : fd_(rhs.fd_) {
         rhs.fd_ = -1;
@@ -28,6 +24,12 @@ public:
     UniqueFd& operator=(UniqueFd&& rhs) noexcept {
         UniqueFd(std::move(rhs)).swap(*this);
         return *this;
+    }
+
+    ~UniqueFd() {
+        if (fd_ >= 0) {
+            ::close(fd_);
+        }
     }
 
     int get() const {
@@ -46,6 +48,10 @@ public:
 
     void swap(UniqueFd& rhs) noexcept {
         std::swap(fd_, rhs.fd_);
+    }
+
+    operator int() const {
+        return get();
     }
 
 private:
