@@ -495,4 +495,21 @@ TEST_F(PromiseTest, joinVectorPromise) {
     EXPECT_EQ(result.value()[1].value(), -1);
 }
 
+TEST_F(PromiseTest, Either) {
+    auto true_branch = []() -> hcomm::Result<int, char> { return hcomm::Ok(1); };
+    auto false_branch = []() -> hcomm::Result<int, char> { return hcomm::Err('a'); };
+
+    // Test true condition
+    auto p1 = hcomm::either(true, true_branch, false_branch);
+    auto res1 = p1(ctx_);
+    EXPECT_TRUE(res1.isOk());
+    EXPECT_EQ(res1.value(), 1);
+
+    // Test false condition
+    auto p2 = hcomm::either(false, true_branch, false_branch);
+    auto res2 = p2(ctx_);
+    EXPECT_TRUE(res2.isErr());
+    EXPECT_EQ(res2.error(), 'a');
+}
+
 } // namespace

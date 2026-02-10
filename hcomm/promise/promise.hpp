@@ -530,6 +530,25 @@ private:
     ContextHandlerInvoker<Handler> handler_;
 };
 
+/// Continuation that represents a conditional branch, holding one of two possible continuations.
+template <typename L, typename R>
+class EitherContinuation {
+public:
+    explicit EitherContinuation(L l) : either_(std::in_place_index<0>, std::move(l)) {}
+    explicit EitherContinuation(R r) : either_(std::in_place_index<1>, std::move(r)) {}
+
+    auto operator()(Context& ctx) {
+        if (either_.index() == 0) {
+            return std::get<0>(either_)(ctx);
+        } else {
+            return std::get<1>(either_)(ctx);
+        }
+    }
+
+private:
+    std::variant<ContextHandlerInvoker<L>, ContextHandlerInvoker<R>> either_;
+};
+
 /// Continuation logic for `joinPromises()` (variadic version).
 template <typename... Ps>
 class JoinContinuation {
@@ -925,6 +944,25 @@ inline auto makeErrPromise(E error) {
 
 inline auto makeErrPromise() {
     return makeResultPromise<void, void>(Err());
+}
+
+/// Creates a promise that conditionally executes one of two functions.
+///
+/// Based on the `cond` parameter, it will execute either `true_f` or `false_f`. This is useful for creating
+/// conditional branches within a promise chain.
+///
+/// ```cpp
+/// auto p = either(user.is_valid(),
+///                 [] { return makeResultPromise<int, std::string>(Ok(1)); },
+///                 [] { return makeResultPromise<int, std::string>(Err("invalid user"s)); });
+/// ```
+template <typename F1, typename F2>
+auto either(bool cond, F1 true_f, F2 false_f) {
+    if (cond) {
+        return PromiseImpl(internal::EitherContinuation<F1, F2>(std::move(true_f)));
+    } else {
+        return PromiseImpl(internal::EitherContinuation<F1, F2>(std::move(false_f)));
+    }
 }
 
 /// Creates a promise that joins multiple promises.
