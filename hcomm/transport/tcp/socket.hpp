@@ -6,6 +6,7 @@
 #include <expected>
 #include <span>
 
+#include "hcomm/base/refptr.hpp"
 #include "hcomm/base/unique_fd.hpp"
 #include "hcomm/promise/promise.hpp"
 #include "hcomm/transport/tcp/address.hpp"
@@ -26,7 +27,7 @@ class Listener;
 ///
 /// The socket's lifetime is tied to the `UniqueFd` it holds. When a `Socket` object is destroyed, its file descriptor
 /// is automatically closed.
-class Socket final {
+class Socket final : public RefCounted<Socket> {
 public:
     Socket(int fd) : fd_(fd) {}
 
@@ -46,9 +47,9 @@ public:
     /// If the read operation cannot complete immediately (returns `EAGAIN`), it registers a waker with the
     /// `IOExecutor` and returns `Pending`. The promise will be resumed when the socket becomes readable again.
     ///
-    /// A result of `Err(0)` typically indicates that the remote peer has closed the connection (EOF).
+    /// A result of `Ok(0)` typically indicates that the remote peer has closed the connection (EOF).
     auto read(std::span<char> buf) {
-        return makePromise([buf, this](Context& ctx) -> Result<ssize_t, int> {
+        return makePromise([buf, this, self = shared_from_this()](Context& ctx) -> Result<ssize_t, int> {
             auto* exec = reinterpret_cast<IOExecutor*>(ctx.executor());
 
             ssize_t nread = ::read(fd_.get(), buf.data(), buf.size());
@@ -58,11 +59,7 @@ public:
                     return Pending{};
                 }
                 return Err(errno);
-            } else if (nread == 0) {
-                exec->deregister(fd_.get());
-                return Err(0);
             }
-
             return Ok(nread);
         });
     }
@@ -75,7 +72,7 @@ public:
     /// `IOExecutor` and returns `Pending`. The promise will be resumed when the socket becomes writable again. It is
     /// the caller's responsibility to handle partial writes by calling `write` again with the remaining data.
     auto write(std::span<char> buf) {
-        return makePromise([buf, this](Context& ctx) -> Result<ssize_t, int> {
+        return makePromise([buf, this, self = shared_from_this()](Context& ctx) -> Result<ssize_t, int> {
             auto* exec = reinterpret_cast<IOExecutor*>(ctx.executor());
 
             ssize_t nwrite = ::write(fd_.get(), buf.data(), buf.size());
@@ -84,7 +81,6 @@ public:
                     exec->waitForWrite(fd_.get(), ctx.waker());
                     return Pending{};
                 }
-
                 return Err(errno);
             }
             return Ok(nwrite);
@@ -100,7 +96,7 @@ class AcceptContinuation {
 public:
     AcceptContinuation(Listener* listener) : listener_(listener) {}
 
-    Result<Socket, int> operator()(Context& ctx);
+    Result<RefPtr<Socket>, int> operator()(Context& ctx);
 
 private:
     Listener* listener_;

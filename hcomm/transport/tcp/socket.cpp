@@ -12,11 +12,11 @@
 namespace hcomm {
 namespace tcp {
 namespace internal {
-Result<Socket, int> AcceptContinuation::operator()(Context& ctx) {
+Result<RefPtr<Socket>, int> AcceptContinuation::operator()(Context& ctx) {
     // accept
     int cfd = ::accept4(listener_->fd(), nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
     if (cfd >= 0) {
-        return Ok(Socket(cfd));
+        return Ok(makeRef<Socket>(cfd));
     }
 
     if (errno == EAGAIN) {

@@ -8,6 +8,7 @@
 
 #include <cerrno>
 #include <map>
+#include <mutex>
 #include <queue>
 #include <utility>
 
@@ -93,7 +94,9 @@ public:
     }
 
     void reschedule(RefPtr<ScheduledTaskNode> node) {
+        std::lock_guard lock(mtx_);
         ready_queue_.push(std::move(node));
+        notify();
     }
 
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
@@ -126,7 +129,12 @@ public:
         std::array<struct epoll_event, 128> evs;
         while (!stop_) {
             // Prevent new tasks from being generated during the processing of the current batch.
-            auto q = std::move(ready_queue_);
+            std::queue<RefPtr<ScheduledTaskNode>> q;
+            {
+                std::lock_guard lock(mtx_);
+                q.swap(ready_queue_);
+            }
+
             while (!q.empty()) {
                 auto task = q.front();
                 q.pop();
@@ -169,6 +177,7 @@ private:
     UniqueFd epfd_;
     UniqueFd notify_fd_;
     IOExecutor* executor_;
+    std::mutex mtx_;
     std::queue<RefPtr<ScheduledTaskNode>> ready_queue_;
     std::map<int, IORegistration> registry_;
 };
