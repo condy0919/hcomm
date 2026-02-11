@@ -13,16 +13,17 @@ namespace hcomm {
 namespace tcp {
 namespace internal {
 Result<RefPtr<Socket>, int> AcceptContinuation::operator()(Context& ctx) {
+    IOExecutor* exec = static_cast<IOExecutor*>(ctx.executor());
+
     // accept
     int cfd = ::accept4(listener_->fd(), nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
     if (cfd >= 0) {
-        return Ok(makeRef<Socket>(cfd));
+        return Ok(makeRef<Socket>(cfd, exec));
     }
 
     if (errno == EAGAIN) {
         // wakeup later
-        Executor* exec = ctx.executor();
-        static_cast<IOExecutor*>(exec)->waitForRead(listener_->fd(), ctx.waker());
+        exec->waitForRead(listener_->fd(), ctx.waker());
         return Pending{};
     }
 
@@ -30,7 +31,15 @@ Result<RefPtr<Socket>, int> AcceptContinuation::operator()(Context& ctx) {
 }
 } // namespace internal
 
-std::expected<Listener, int> Listener::bind(const SocketAddress& sa) {
+Socket::~Socket() {
+    executor_->deregister(fd_.get());
+}
+
+Listener::~Listener() {
+    executor_->deregister(fd_.get());
+}
+
+std::expected<Listener, int> Listener::bind(IOExecutor* exec, const SocketAddress& sa) {
     // nonblocking by default
     int fd = ::socket(sa.ip().family(), SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0) {
@@ -66,7 +75,10 @@ std::expected<Listener, int> Listener::bind(const SocketAddress& sa) {
         return std::unexpected(errno);
     }
 
-    return Listener(ufd.release());
+    // register events
+    return exec->registerEvent(ufd.get(), EPOLLIN | EPOLLET | EPOLLEXCLUSIVE, 0).transform([&ufd, &exec]() {
+        return Listener(ufd.release(), exec);
+    });
 }
 
 } // namespace tcp

@@ -15,8 +15,21 @@
 namespace hcomm {
 namespace tcp {
 // forward
+class Socket;
 class IOExecutor;
 class Listener;
+
+namespace internal {
+class AcceptContinuation {
+public:
+    AcceptContinuation(Listener* listener) : listener_(listener) {}
+
+    Result<RefPtr<Socket>, int> operator()(Context& ctx);
+
+private:
+    Listener* listener_;
+};
+} // namespace internal
 
 /// A non-blocking TCP socket for asynchronous I/O operations.
 ///
@@ -29,12 +42,12 @@ class Listener;
 /// is automatically closed.
 class Socket final : public RefCounted<Socket> {
 public:
-    Socket(int fd) : fd_(fd) {}
+    Socket(int fd, IOExecutor* exec) : fd_(fd), executor_(exec) {}
 
     Socket(Socket&& rhs) noexcept = default;
     Socket& operator=(Socket&& rhs) noexcept = default;
 
-    ~Socket() = default;
+    ~Socket();
 
     int fd() const {
         return fd_.get();
@@ -89,19 +102,8 @@ public:
 
 private:
     UniqueFd fd_;
+    IOExecutor* executor_;
 };
-
-namespace internal {
-class AcceptContinuation {
-public:
-    AcceptContinuation(Listener* listener) : listener_(listener) {}
-
-    Result<RefPtr<Socket>, int> operator()(Context& ctx);
-
-private:
-    Listener* listener_;
-};
-} // namespace internal
 
 /// A non-blocking TCP listener for accepting incoming connections.
 ///
@@ -112,13 +114,13 @@ public:
     Listener(Listener&& rhs) noexcept = default;
     Listener& operator=(Listener&& rhs) noexcept = default;
 
-    ~Listener() = default;
+    ~Listener();
 
     /// Creates a `Listener` by binding to a socket address and listening for incoming connections.
     ///
     /// This static method handles the creation of a non-blocking socket, sets reuse address and port options, binds it
     /// to the given `SocketAddress`, and puts it into the listening state.
-    static std::expected<Listener, int> bind(const SocketAddress& sa);
+    static std::expected<Listener, int> bind(IOExecutor* exec, const SocketAddress& sa);
 
     int fd() const {
         return fd_.get();
@@ -140,9 +142,10 @@ public:
     }
 
 private:
-    Listener(int fd) : fd_(fd) {}
+    Listener(int fd, IOExecutor* exec) : fd_(fd), executor_(exec) {}
 
     UniqueFd fd_;
+    IOExecutor* executor_;
 };
 
 } // namespace tcp

@@ -4,6 +4,7 @@
 #define HCOMM_TRANSPORT_TCP_EXECUTOR_HPP_
 
 #include <exception>
+#include <expected>
 #include <memory>
 
 #include "hcomm/base/refptr.hpp"
@@ -85,6 +86,8 @@ public:
     ///
     /// When the associated I/O event occurs, `waker.wake()` will be called.
     void waitForWrite(int fd, Waker writer);
+
+    std::expected<void, int> registerEvent(int fd, std::uint32_t events, std::uint64_t data);
 
     /// Deregisters all event notifications for a given file descriptor.
     void deregister(int fd);

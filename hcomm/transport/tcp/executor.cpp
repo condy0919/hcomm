@@ -75,7 +75,7 @@ public:
 
         struct epoll_event interest;
         interest.events = EPOLLIN;
-        interest.data.fd = notify_fd;
+        interest.data.ptr = nullptr;
         ::epoll_ctl(epfd, EPOLL_CTL_ADD, notify_fd, &interest);
     }
 
@@ -116,6 +116,19 @@ public:
         ::epoll_ctl(epfd_.get(), op, fd, &ev);
     }
 
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+    std::expected<void, int> registerEvent(int fd, std::uint32_t events, std::uint64_t data) {
+        struct epoll_event ev = {
+            .events = events,
+            .data = {.u64 = data},
+        };
+        int ret = ::epoll_ctl(epfd_.get(), EPOLL_CTL_ADD, fd, &ev);
+        if (ret < 0) {
+            return std::unexpected(errno);
+        }
+        return {};
+    }
+
     void deregister(int fd) {
         registry_.erase(fd);
         ::epoll_ctl(epfd_.get(), EPOLL_CTL_DEL, fd, nullptr);
@@ -151,8 +164,8 @@ public:
             }
 
             for (std::size_t i = 0; i < static_cast<std::size_t>(num); ++i) {
-                // The fd is unlikely to overlap with other IORegistration*.
-                if (evs[i].data.fd == notify_fd_.get()) {
+                // Someone called `notify()` in other thread.
+                if (evs[i].data.ptr == nullptr) {
                     eventfd_t value = 0;
                     ::eventfd_read(notify_fd_.get(), &value);
                     continue;
@@ -206,6 +219,10 @@ void IOExecutor::waitForRead(int fd, Waker waker) {
 
 void IOExecutor::waitForWrite(int fd, Waker waker) {
     dispatcher_->registerWaker(fd, EPOLLOUT | EPOLLET, std::move(waker));
+}
+
+std::expected<void, int> IOExecutor::registerEvent(int fd, std::uint32_t events, std::uint64_t data) {
+    return dispatcher_->registerEvent(fd, events, data);
 }
 
 void IOExecutor::deregister(int fd) {
