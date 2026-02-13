@@ -8,6 +8,6 @@ if(HCOMM_BUILD_TESTS)
     PRIVATE
       hcomm::hcomm
       GTest::gtest_main
-    )
+  )
   add_test(NAME hcomm_memory_test COMMAND hcomm_memory_test)
 endif()

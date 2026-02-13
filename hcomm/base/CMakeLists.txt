@@ -13,8 +13,8 @@ if(HCOMM_BUILD_BENCHMARKS)
     PRIVATE
       hcomm::hcomm
       benchmark::benchmark_main
-    )
-    add_test(NAME hcomm_base_benchmark COMMAND hcomm_base_benchmark)
+  )
+  add_test(NAME hcomm_base_benchmark COMMAND hcomm_base_benchmark)
 endif()
 
 if(HCOMM_BUILD_TESTS)
@@ -28,6 +28,6 @@ if(HCOMM_BUILD_TESTS)
     PRIVATE
       hcomm::hcomm
       GTest::gtest_main
-    )
+  )
   add_test(NAME hcomm_base_test COMMAND hcomm_base_test)
 endif()
