@@ -15,22 +15,28 @@
 
 namespace hcomm {
 namespace internal {
-// This is similar to `ResourceId` but has a default constructor, which is the only difference.
+/// A 64-bit value combining an index and a tag, used for the lock-free list head.
+///
+/// This is similar to `ResourceId`, but has a default constructor to allow it to be a field in a class (e.g.,
+/// `PagedResourcePool::free_head_`). The tag is crucial for solving the ABA problem in the lock-free stack
+/// implementation of the free list.
 class TaggedIndex {
 public:
     TaggedIndex() = default;
 
     TaggedIndex(std::uint32_t idx, std::uint32_t tag) : value_((static_cast<std::uint64_t>(tag) << 32) | idx) {}
 
+    /// Returns the 32-bit index.
     std::uint32_t index() const {
         return static_cast<std::uint32_t>(value_ & 0xffffffff);
     }
 
+    /// Returns the 32-bit tag (or version).
     std::uint32_t tag() const {
         return static_cast<std::uint32_t>(value_ >> 32);
     }
 
-    operator std::uint64_t() const {
+    explicit operator std::uint64_t() const {
         return value_;
     }
 
@@ -38,14 +44,17 @@ private:
     std::uint64_t value_ = 0;
 };
 
-static_assert(std::atomic<internal::TaggedIndex>::is_always_lock_free, "atomic ops on TaggedIndex are mutex based.");
+static_assert(std::atomic<internal::TaggedIndex>::is_always_lock_free,
+              "Atomic operations on TaggedIndex must be lock-free for performance.");
+
 } // namespace internal
 
-/// A versioned, opaque handle to a resource within the pool.
+/// A versioned, opaque handle to a resource within a `PagedResourcePool`.
 ///
-/// The resource pool is slot-based. A `ResourceId` combines a slot's index with a version number. The version is
-/// incremented each time a resource is freed, which prevents the ABA problem where an old, invalid ID could
-/// accidentally access a new resource that happens to be allocated in the same slot.
+/// The resource pool is slot-based. A `ResourceId` combines a slot's 32-bit index with a 32-bit version number. The
+/// version is incremented each time a resource is freed, which effectively invalidates old IDs for that slot. This
+/// prevents the ABA problem, where an old, invalid ID could accidentally access a new resource that happens to be
+/// allocated in the same slot.
 class ResourceId {
 public:
     /// Constructs a ResourceId from its raw parts.
@@ -58,12 +67,12 @@ public:
         return static_cast<std::uint32_t>(value_ & 0xffffffff);
     }
 
-    /// Returns the 32-bit version of the resource.
+    /// Returns the 32-bit version of the resource slot.
     std::uint32_t version() const {
         return static_cast<std::uint32_t>(value_ >> 32);
     }
 
-    operator std::uint64_t() const {
+    explicit operator std::uint64_t() const {
         return value_;
     }
 
@@ -74,18 +83,18 @@ private:
 /// Concept defining the requirements for a custom memory allocation policy.
 ///
 /// A policy allows the `PagedResourcePool` to use different backend allocators, for example, to allocate from a
-/// specific NUMA node or a pre-registered memory region for RDMA/UB.
+/// specific NUMA node or a pre-registered memory region for RDMA/UB transports.
 template <typename T>
-concept PagedAllocatorPolicy = requires {
-    /// The policy can define a metadata struct. This metadata will be stored once per memory block. It is useful for
-    /// storing information like RDMA/UB memory region handles.
+concept PagedAllocatorPolicy = requires(std::size_t sz, void* ptr) {
+    /// The policy can define a `Metadata` struct. This metadata will be stored once per memory block and can be used
+    /// for storing information like RDMA/UB memory region handles.
     typename T::Metadata;
 
     /// A static method to allocate a block of memory of a given size.
-    { T::allocate(0) } -> std::convertible_to<void*>;
+    { T::allocate(sz) } -> std::convertible_to<void*>;
 
     /// A static method to deallocate a block of memory.
-    { T::deallocate(nullptr) } -> std::same_as<void>;
+    { T::deallocate(ptr) } -> std::same_as<void>;
 };
 
 /// A default allocation policy that uses global `::operator new` and `::operator delete`.
@@ -116,8 +125,9 @@ struct PagedResourcePoolConfig {
 
 /// A high-performance, thread-safe, paged resource pool for managing objects of type `T`.
 ///
-/// It provides lock-free `alloc`, `free`, and `get` operations for hot paths. Memory expansion is handled on a
-/// less-frequently-used "cold path" that uses a mutex to ensure thread safety.
+/// This class is designed for extreme performance. It provides lock-free `alloc`, `free`, and `get` operations for
+/// hot paths. Memory expansion is handled on a less-frequently-used "cold path" that uses a mutex to ensure thread
+/// safety.
 ///
 /// This pool manages object lifetime explicitly. It constructs objects with placement new in `alloc` and calls
 /// destructors in `free`. This avoids constructing objects until they are actually allocated, making it suitable for
@@ -125,6 +135,10 @@ struct PagedResourcePoolConfig {
 ///
 /// The pool's behavior can be customized via the `AllocPolicy` and `Config` template parameters. `AllocPolicy` defines
 /// how memory blocks are allocated, while `Config` defines the pool's geometry, such as slots per block.
+///
+/// NOTE: For correctness, a `ResourceId` obtained from `alloc()` in one thread must be `free()`d within the *same
+/// thread*. This design does not protect against data races that could arise from freeing a resource from a different
+/// thread.
 template <typename T, PagedAllocatorPolicy AllocPolicy = DefaultAllocator, typename Config = PagedResourcePoolConfig<T>>
 class PagedResourcePool final {
     static constexpr std::size_t kSlotsPerBlock = Config::kSlotsPerBlock;
@@ -143,20 +157,23 @@ public:
 
     /// Constructs a new, empty resource pool.
     PagedResourcePool() : num_blocks_(0) {
-        // The free list is a lock-free stack, identified by its head. It starts as -1 (empty).
-        // See comments of `free_head_` below.
+        // The free list is a lock-free stack, identified by its head. The head is a `TaggedIndex` to prevent the ABA
+        // problem. It starts as index -1 (empty) with tag 0.
         free_head_.store(internal::TaggedIndex(static_cast<std::uint32_t>(-1), 0));
     }
 
-    /// Destroys the resource pool. Deallocates all memory blocks acquired from the AllocPolicy.
+    PagedResourcePool(PagedResourcePool&& rhs) noexcept = delete;
+    PagedResourcePool& operator=(PagedResourcePool&& rhs) noexcept = delete;
+
+    /// Destroys the resource pool and deallocates all memory blocks.
     ///
     /// NOTE: This does NOT call destructors on any active (in-use) resources. It is the user's responsibility to
     /// ensure all resources are returned to the pool via `free()` before the pool is destroyed to avoid resource
     /// leaks.
     ~PagedResourcePool() {
         for (std::size_t i = 0; i < num_blocks_; ++i) {
-            // Use relaxed memory order because this is the destructor. No other thread should be concurrently
-            // accessing the pool, so no synchronization is needed.
+            // Use relaxed memory order because this is the destructor. No other thread can be concurrently accessing
+            // the pool, so no synchronization is needed.
             if (Block* blk = block_ptrs_[i].load(std::memory_order_relaxed)) {
                 AllocPolicy::deallocate(blk);
             }
@@ -178,22 +195,27 @@ public:
             auto current_head = free_head_.load(std::memory_order_acquire);
 
             const std::uint32_t head_idx = current_head.index();
-            if (head_idx == -1) {
-                // The free list is empty, try to expand the pool. If another thread has already expanded it, the
-                // subsequent attempt to grab a free slot will succeed. If expansion fails (e.g., pool is at max
-                // capacity), `expand()` returns false.
+            if (head_idx == static_cast<std::uint32_t>(-1)) {
+                // The free list is empty. Try to expand the pool on the cold path. If another thread expands it first,
+                // our next loop iteration will succeed. If expansion fails (e.g., pool at max capacity), `expand()`
+                // returns false.
                 if (!expand()) {
                     return std::nullopt;
                 }
-                continue;
+                continue; // Retry allocation.
             }
 
-            // Prepare the new head for the free list.
             Slot* slot = getSlotByIndex(head_idx);
-            // Relaxed memory order is sufficient because we have effectively acquired ownership of this slot by popping
-            // it from the `free_head_` stack. No other thread should be accessing `next_free_idx` of this slot. Its
-            // value was set before the slot was pushed to the free list, and the visibility is guaranteed by the
-            // acquire on `free_head_`.
+            if (slot == nullptr) [[unlikely]] {
+                // This should not happen in a correct implementation, but as a safeguard, we handle the case where an
+                // index points to an unallocated block.
+                return std::nullopt;
+            }
+
+            // Prepare the new head for the free list. Relaxed memory order is sufficient here because we have
+            // effectively acquired ownership of this slot by popping it from the `free_head_` stack. No other thread
+            // should be accessing `next_free_idx` of this slot. Its value was set before the slot was pushed to the
+            // free list, and its visibility is guaranteed by the acquire on `free_head_`.
             const std::uint32_t next_idx = slot->next_free_idx.load(std::memory_order_relaxed);
             const std::uint32_t next_tag = current_head.tag() + 1;
             internal::TaggedIndex new_head(next_idx, next_tag);
@@ -208,24 +230,23 @@ public:
             // again and reload `free_head_` with acquire semantics. No special ordering is needed on failure.
             if (free_head_.compare_exchange_weak(current_head, new_head, std::memory_order_acquire,
                                                  std::memory_order_relaxed)) {
-                // Relaxed load is sufficient. We have exclusive access to this slot now because we successfully took it
-                // from the free list. No other thread can be modifying its version.
+                // Success! We now have exclusive access to this slot. A relaxed load is sufficient for the version, as
+                // no other thread can modify it while we hold ownership.
                 std::uint32_t ver = slot->version.load(std::memory_order_relaxed);
 
                 try {
                     T* resource = new (&slot->storage) T(std::forward<Args>(args)...);
                     return Allocation{ResourceId(head_idx, ver), resource};
                 } catch (...) {
-                    // Roll back the allocation. The slot was taken from the free list, but the object construction
-                    // failed. To maintain pool integrity, we must return the slot to the free list.
+                    // If construction fails, we must roll back the allocation to prevent leaking the slot. The slot is
+                    // returned to the head of the free list. The slot version is NOT incremented, as the resource was
+                    // never successfully given to the user.
                     while (true) {
-                        // The version of the slot is NOT incremented, because the resource was never successfully
-                        // allocated, so no "free" call is expected for this version.
-                        auto current_head = free_head_.load(std::memory_order_relaxed);
-                        slot->next_free_idx.store(current_head.index(), std::memory_order_relaxed);
-                        internal::TaggedIndex new_head(head_idx, current_head.tag() + 1);
-                        if (free_head_.compare_exchange_weak(current_head, new_head, std::memory_order_release,
-                                                             std::memory_order_relaxed)) {
+                        auto current_head_for_rollback = free_head_.load(std::memory_order_relaxed);
+                        slot->next_free_idx.store(current_head_for_rollback.index(), std::memory_order_relaxed);
+                        internal::TaggedIndex new_head_for_rollback(head_idx, current_head_for_rollback.tag() + 1);
+                        if (free_head_.compare_exchange_weak(current_head_for_rollback, new_head_for_rollback,
+                                                             std::memory_order_release, std::memory_order_relaxed)) {
                             break;
                         }
                     }
@@ -245,24 +266,26 @@ public:
     void free(ResourceId id) {
         Slot* slot = getSlotByIndex(id.index());
         if (!slot) {
-            return;
+            return; // Invalid index.
         }
 
-        // The ID is stale, which means the resource has likely already been freed.
-        // A relaxed load is acceptable here. This is a pre-check to quickly reject an obviously stale ID. The user of
-        // the pool is responsible for not freeing the same ID from multiple threads concurrently. The critical
-        // synchronization happens later with `fetch_add`.
+        // This relaxed load is a fast pre-check to reject an obviously stale ID. If the version doesn't match, the
+        // resource has likely already been freed. The user is responsible for not freeing the same ID from multiple
+        // threads concurrently. The critical synchronization happens later.
         const std::uint32_t ver = slot->version.load(std::memory_order_relaxed);
-        if (ver != id.version()) {
-            return;
+        if (ver != id.version()) [[unlikely]] {
+            return; // Stale ID, likely a double-free.
         }
 
         if constexpr (!std::is_trivially_destructible_v<T>) {
             std::destroy_at(addr(slot));
         }
 
-        // Relaxed load is fine. The actual synchronization happens in the CAS itself.
+        // Increment the slot's version. This invalidates all old `ResourceId` handles pointing to this slot. A relaxed
+        // order is sufficient because the subsequent release-CAS on `free_head_` will publish this change.
         slot->version.fetch_add(1, std::memory_order_relaxed);
+
+        // Atomically push the freed slot back onto the `free_head_` stack.
         while (true) {
             // Relaxed load is fine within the CAS loop. The actual synchronization happens in the CAS itself.
             auto current_head = free_head_.load(std::memory_order_relaxed);
@@ -320,6 +343,7 @@ public:
             return false;
         }
 
+        // Acquire semantics are used for the same reason as in `get()`.
         return slot->version.load(std::memory_order_acquire) == id.version();
     }
 
@@ -334,8 +358,8 @@ public:
             return nullptr;
         }
 
-        // Acquire load synchronizes with the release store on `block_ptrs_` in `expand()`. This ensures that we get a
-        // pointer to a fully initialized `Block` and not a partially constructed one.
+        // Acquire load synchronizes with the release store on `block_ptrs_` in `expand()`, ensuring we see a fully
+        // initialized `Block`.
         Block* blk = block_ptrs_[block_idx].load(std::memory_order_acquire);
         if (!blk) {
             return nullptr;
@@ -345,13 +369,17 @@ public:
     }
 
 private:
-    /// A Slot represents a single potential location for a resource. It is aligned to at least 64 bytes to prevent
-    /// false sharing between adjacent slots when accessed by different threads.
+    /// A Slot represents a single potential location for a resource. It is aligned to a cache line boundary to prevent
+    /// false sharing between adjacent slots.
     struct alignas(HCOMM_CACHELINE_SIZE) Slot {
         /// Aligned storage for a single `T` object. `T` is only constructed here via placement new during `alloc`.
-        alignas(T) char storage[sizeof(T)];
+        alignas(T) unsigned char storage[sizeof(T)];
 
         /// The version of the slot, incremented on each `free` operation.
+        ///
+        /// The initial value is 1, not 0. This is a defensive measure to prevent a zero-initialized `ResourceId`
+        /// (e.g., from `memset`) from accidentally matching and appearing valid for the 0th slot, which would have
+        /// version 0 if we were not careful.
         std::atomic<std::uint32_t> version{1};
 
         /// The index of the next free slot in the lock-free stack.
@@ -465,9 +493,9 @@ private:
 
         // Double check: after acquiring the lock, check if another thread has already expanded the pool while we were
         // waiting.
-        // Relaxed load is fine for this check. We are holding the `expand_mtx_`, so no other thread can be in
-        // `expand()`. This is just an optimization to see if another thread already finished an expansion and populated
-        // the free list while we were waiting for the lock.
+        // Relaxed load is fine for this check (`std::mutex` provides release-acquire synchronization). We are holding
+        // the `expand_mtx_`, so no other thread can be in `expand()`. This is just an optimization to see if another
+        // thread already finished an expansion and populated the free list while we were waiting for the lock.
         if (free_head_.load(std::memory_order_relaxed).index() != static_cast<std::uint32_t>(-1)) {
             return true;
         }
@@ -492,7 +520,7 @@ private:
         new_block->slots[kSlotsPerBlock - 1].next_free_idx.store(static_cast<std::uint32_t>(-1),
                                                                  std::memory_order_relaxed);
 
-        //  Publish the new block so it's visible to other threads.
+        // Publish the new block so it's visible to other threads.
         // The release semantics ensure that all prior writes to the `new_block` (initializing the slots) are visible
         // before other threads can see the pointer to it via an acquire-load.
         block_ptrs_[block_idx].store(new_block, std::memory_order_release);
