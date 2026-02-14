@@ -5,6 +5,7 @@
 
 #include <concepts>
 #include <cstdint>
+#include <expected>
 #include <utility>
 #include <variant>
 
@@ -109,19 +110,42 @@ public:
         requires std::constructible_from<E, U&&>
     Result(Err<U>&& rhs) noexcept : state_(std::in_place_index<2>, E(std::move(rhs.error))) {}
 
-    /// Copies/Assigns if copyable/assignable.
-    Result(const Result& rhs) = default;
-    Result& operator=(const Result& rhs) = default;
+    /// Constructs from std::expected<T, E>&&.
+    Result(std::expected<T, E>&& exp) noexcept
+        requires(!std::is_void_v<T> && !std::is_void_v<E>)
+    {
+        if (exp.has_value()) {
+            state_.template emplace<1>(std::move(exp.value()));
+        } else {
+            state_.template emplace<2>(std::move(exp.error()));
+        }
+    }
+
+    /// Constructs from const std::expected<T, E>&.
+    Result(const std::expected<T, E>& exp)
+        requires(!std::is_void_v<T> && !std::is_void_v<E>)
+    {
+        if (exp.has_value()) {
+            state_.template emplace<1>(exp.value());
+        } else {
+            state_.template emplace<2>(exp.error());
+        }
+    }
 
     /// Moves/Assigns from another `Result`, leaving it in pending state.
     Result(Result&& rhs) noexcept : state_(std::move(rhs.state_)) {
         rhs.reset();
     }
+
+    Result(const Result& rhs) = default;
+
     Result& operator=(Result&& rhs) noexcept {
         state_ = std::move(rhs.state_);
         rhs.reset();
         return *this;
     }
+
+    Result& operator=(const Result& rhs) = default;
 
     ~Result() = default;
 

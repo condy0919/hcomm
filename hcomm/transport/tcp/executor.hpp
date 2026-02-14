@@ -8,6 +8,7 @@
 #include <memory>
 
 #include "hcomm/base/refptr.hpp"
+#include "hcomm/memory/paged_resource_pool.hpp"
 #include "hcomm/promise/promise.hpp"
 
 namespace hcomm {
@@ -48,11 +49,18 @@ private:
 /// ```
 class IOExecutor : public Executor {
 public:
+    /// Constructs an `IOExecutor`.
+    ///
+    /// Initializes the underlying I/O dispatcher (epoll instance) and prepares the executor for scheduling tasks.
     IOExecutor();
 
     IOExecutor(IOExecutor&& rhs) noexcept = delete;
     IOExecutor& operator=(IOExecutor&& rhs) noexcept = delete;
 
+    /// Destroys the `IOExecutor`.
+    ///
+    /// This will stop the event loop if it is running and clean up all associated resources, including the I/O
+    /// dispatcher.
     ~IOExecutor() override;
 
     /// Schedules a task (e.g., the root of a promise chain) for execution.
@@ -76,21 +84,31 @@ public:
     /// an I/O event to occur.
     void notify();
 
-    /// Registers a waker to be notified when a file descriptor becomes readable.
+    /// Asks the executor to notify the waker when the corresponding resource becomes readable.
     ///
-    /// When the associated I/O event occurs, `waker.wake()` will be called, which typically reschedules the associated
-    /// task on the executor.
-    void waitForRead(int fd, Waker reader);
+    /// The `reader` waker will be invoked when an I/O event indicates that the resource identified by `id` is ready
+    /// for a read operation. This is part of the mechanism that bridges asynchronous I/O events with the
+    /// promise-based task scheduler.
+    void waitForRead(ResourceId id, Waker waker);
 
-    /// Registers a waker to be notified when a file descriptor becomes writable.
+    /// Asks the executor to notify the waker when the corresponding resource becomes writable.
     ///
-    /// When the associated I/O event occurs, `waker.wake()` will be called.
-    void waitForWrite(int fd, Waker writer);
+    /// The `writer` waker will be invoked when an I/O event indicates that the resource identified by `id` is ready
+    /// for a write operation. This allows tasks to yield until the underlying socket has buffer space available.
+    void waitForWrite(ResourceId id, Waker waker);
 
-    std::expected<void, int> registerEvent(int fd, std::uint32_t events, std::uint64_t data);
+    /// Registers a file descriptor for I/O event monitoring with the executor.
+    ///
+    /// This method associates a file descriptor `fd` with the executor's underlying I/O multiplexer (epoll). The
+    /// `events` mask specifies the types of I/O events to monitor (e.g., `EPOLLIN`, `EPOLLOUT`).
+    ///
+    /// On success, it returns a `ResourceId`, which is a handle that uniquely identifies this registration. This ID is
+    /// required for subsequent operations like `waitForRead`, `waitForWrite`, and `deregister`. On failure, it returns
+    /// an error code (errno).
+    std::expected<ResourceId, int> registerEvent(int fd, std::uint32_t events);
 
     /// Deregisters all event notifications for a given file descriptor.
-    void deregister(int fd);
+    void deregister(int fd, ResourceId id);
 
 private:
     class Dispatcher;

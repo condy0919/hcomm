@@ -62,6 +62,9 @@ public:
     /// Users of the pool should not need to construct this directly.
     ResourceId(std::uint32_t idx, std::uint32_t ver) : value_((static_cast<std::uint64_t>(ver) << 32) | idx) {}
 
+    /// Constructs a ResourceId from std::uint64_t.
+    ResourceId(std::uint64_t value) : value_(value) {}
+
     /// Returns the 32-bit index of the slot in the pool.
     std::uint32_t index() const {
         return static_cast<std::uint32_t>(value_ & 0xffffffff);
@@ -515,7 +518,8 @@ private:
         for (std::size_t i = 0; i < kSlotsPerBlock - 1; ++i) {
             // Relaxed stores are sufficient here. We are initializing a new block of memory that is not yet visible to
             // any other thread. These writes will be made visible to other threads by the release operations below.
-            new_block->slots[i].next_free_idx.store(base_idx + i + 1, std::memory_order_relaxed);
+            new_block->slots[i].next_free_idx.store(base_idx + static_cast<std::uint32_t>(i) + 1,
+                                                    std::memory_order_relaxed);
         }
         new_block->slots[kSlotsPerBlock - 1].next_free_idx.store(static_cast<std::uint32_t>(-1),
                                                                  std::memory_order_relaxed);
