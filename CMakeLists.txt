@@ -17,6 +17,7 @@ include(FetchContent)
 
 option(HCOMM_BUILD_TESTS "Build tests" OFF)
 option(HCOMM_BUILD_BENCHMARKS "Build benchmarks" OFF)
+option(HCOMM_BUILD_EXAMPLES "Build examples" OFF)
 option(HCOMM_ENABLE_COVERAGE "Enable code coverage" OFF)
 
 # Sources for the library are specified at the end
@@ -100,6 +101,9 @@ target_include_directories(hcomm PUBLIC
 
 ### Sources
 add_subdirectory(hcomm)
+if(HCOMM_BUILD_EXAMPLES)
+  add_subdirectory(example)
+endif()
 
 ### Coverage
 if(HCOMM_ENABLE_COVERAGE)
