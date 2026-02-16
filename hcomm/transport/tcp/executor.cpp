@@ -150,7 +150,7 @@ public:
         };
         int ret = ::epoll_ctl(epfd_.get(), EPOLL_CTL_ADD, fd, &ev);
         if (ret < 0) {
-            // 注册失败，回滚释放 slot
+            // Failed to register, rolling back and freeing the slot.
             registry_.free(id);
             return std::unexpected(errno);
         }
@@ -210,17 +210,17 @@ public:
 
                 IORegistration* reg = registry_.get(id);
                 if (reg == nullptr) {
-                    continue; // 野指针，或者已释放的 id
+                    continue; // Invalid ID (e.g., dangling pointer or already freed).
                 }
 
                 if (what & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
-                    // 唤醒后清空，遵循 oneshot 语义
+                    // Waker consumed after waking, adhering to one-shot semantics.
                     auto waker = std::move(reg->read_waker);
                     waker.wake();
                 }
 
                 if (what & (EPOLLOUT | EPOLLERR)) {
-                    // 唤醒后清空，遵循 oneshot 语义
+                    // Waker consumed after waking, adhering to one-shot semantics.
                     auto waker = std::move(reg->write_waker);
                     waker.wake();
                 }
