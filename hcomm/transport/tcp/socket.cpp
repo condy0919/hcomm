@@ -49,7 +49,7 @@ Result<RefPtr<Socket>, NetworkError> AcceptContinuation::operator()(Context& ctx
 Result<ssize_t, NetworkError> ReadContinuation::operator()(Context& ctx) {
     auto* exec = reinterpret_cast<IOExecutor*>(ctx.executor());
 
-    ssize_t nread = ::read(sk_->fd(), buf_.data(), buf_.size());
+    ssize_t nread = ::recv(sk_->fd(), buf_.data(), buf_.size(), 0);
     if (nread < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // Socket is not ready, register a waker to be notified when it is.
@@ -103,7 +103,7 @@ Result<void, NetworkError> ReadExactContinuation::operator()(Context& ctx) {
 Result<ssize_t, NetworkError> WriteContinuation::operator()(Context& ctx) {
     auto* exec = reinterpret_cast<IOExecutor*>(ctx.executor());
 
-    ssize_t nwrite = ::write(sk_->fd(), buf_.data(), buf_.size());
+    ssize_t nwrite = ::send(sk_->fd(), buf_.data(), buf_.size(), MSG_NOSIGNAL);
     if (nwrite < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // Socket buffer is full, register a waker to be notified when space is available.
@@ -129,7 +129,7 @@ Result<void, NetworkError> WriteAllContinuation::operator()(Context& ctx) {
         // MSG_NOSIGNAL prevents SIGPIPE if the peer closes the connection.
         ssize_t nwrite = ::send(sk_->fd(), buf_.data() + offset_, buf_.size() - offset_, MSG_NOSIGNAL);
         if (nwrite >= 0) {
-            offset_ += nwrite;
+            offset_ += static_cast<std::uint32_t>(nwrite);
         } else {
             if (errno == EINTR) {
                 // Interrupted by signal, retry immediately.
