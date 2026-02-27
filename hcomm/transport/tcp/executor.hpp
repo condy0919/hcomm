@@ -69,6 +69,13 @@ public:
     /// primary way to introduce new asynchronous workflows into the executor.
     void schedule(PendingTask task) override;
 
+    /// Returns the timer service for this executor.
+    ///
+    /// Because `IOExecutor` implements the `TimerService` interface directly, this returns a pointer to itself.
+    TimerService* timer() override {
+        return this;
+    }
+
     /// Starts the executor's event loop.
     ///
     /// This is a blocking call that continuously processes ready tasks and polls for I/O events. It will run until

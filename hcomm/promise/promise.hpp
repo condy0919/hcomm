@@ -1566,6 +1566,14 @@ public:
 
     /// Schedules a task for eventual execution by the executor. This method is thread-safe.
     virtual void schedule(PendingTask task) = 0;
+
+    /// Returns the timer service associated with this executor, or `nullptr` if timing is not supported.
+    ///
+    /// This allows the promise framework to dynamically discover timing capabilities for features like
+    /// `PromiseImpl::timeout()`.
+    virtual TimerService* timer() {
+        return nullptr;
+    }
 };
 
 /// Users should inherit WakerImpl to define their own Waker.
@@ -1627,7 +1635,7 @@ TimeoutContinuation<Promise>::~TimeoutContinuation() {
 
 template <typename Promise>
 TimeoutContinuation<Promise>::ResultType TimeoutContinuation<Promise>::operator()(Context& ctx) {
-    auto* timer_svc = dynamic_cast<TimerService*>(ctx.executor());
+    auto* timer_svc = ctx.executor()->timer();
     if (timer_svc == nullptr) {
         // The executor does not implement the required TimerService.
         return Err(ENOSYS);
