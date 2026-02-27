@@ -9,6 +9,11 @@ using namespace hcomm;
 
 void echoLoop(RefPtr<tcp::Socket>& sk, const std::shared_ptr<std::string>& buf, tcp::IOExecutor* exec) {
     exec->schedule(sk->read(*buf)
+                       .timeout(std::chrono::seconds(10))
+                       .orElse([](int& err) -> Result<ssize_t, int> {
+                           HCOMM_LOG_WARN("timed-out! There is no byte received within 10s");
+                           return Err(err);
+                       })
                        .andThen([sk, buf, exec](ssize_t& nread) mutable {
                            return either(
                                nread > 0,
@@ -22,8 +27,8 @@ void echoLoop(RefPtr<tcp::Socket>& sk, const std::shared_ptr<std::string>& buf, 
                                });
                        })
                        .andThen([sk, buf, exec](ssize_t& nwrite) mutable -> Result<void, int> {
-                           HCOMM_LOG_INFO("write {} bytes to fd={}", nwrite, sk->fd());
                            if (nwrite > 0) {
+                               HCOMM_LOG_INFO("write {} bytes to fd={}", nwrite, sk->fd());
                                echoLoop(sk, buf, exec);
                            }
                            return Ok();

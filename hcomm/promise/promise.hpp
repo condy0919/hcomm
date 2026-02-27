@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <functional>
 #include <optional>
 #include <type_traits>
@@ -19,6 +20,12 @@ namespace hcomm {
 class Context;
 class Executor;
 class Waker;
+class TimerService;
+
+/// A unique identifier for a registered timer.
+///
+/// See `TimerService`, `TimeoutContinuation`, and `PromiseImpl::timeout()` for more details.
+using TimerId = std::uint64_t;
 
 /// A concept representing a continuation for a promise.
 ///
@@ -600,6 +607,56 @@ private:
     std::vector<Promise> promises_;
     std::vector<typename Promise::ResultType> results_;
 };
+
+/// Continuation logic for the `timeout()` combinator.
+template <typename Promise>
+class TimeoutContinuation {
+public:
+    using ResultType = typename Promise::ResultType;
+    static_assert(std::is_same_v<typename ResultType::ErrorType, int>,
+                  "TimeoutContinuation uses int to represent CANCELLATION/TIMEOUT.");
+
+    TimeoutContinuation(Promise promise, std::chrono::milliseconds timeout)
+        : promise_(std::move(promise)), timeout_(timeout) {}
+
+    TimeoutContinuation(TimeoutContinuation&& rhs) noexcept
+        : promise_(std::move(rhs.promise_)), timeout_(rhs.timeout_), deadline_(rhs.deadline_), timer_id_(rhs.timer_id_),
+          timer_svc_(rhs.timer_svc_) {
+        rhs.timer_id_.reset();
+    }
+
+    TimeoutContinuation& operator=(TimeoutContinuation&& rhs) noexcept {
+        TimeoutContinuation(std::move(rhs)).swap(*this);
+        return *this;
+    }
+
+    ~TimeoutContinuation();
+
+    /// Drives the promise, checking for timeouts.
+    ///
+    /// On the first call, it registers a timer with the executor's `TimerService`. It then polls the underlying
+    /// promise. If the promise is still pending, it checks the current time against the deadline.
+    ResultType operator()(Context& ctx);
+
+private:
+    void swap(TimeoutContinuation&& rhs) noexcept {
+        using std::swap;
+
+        swap(promise_, rhs.promise_);
+        swap(timeout_, rhs.timeout_);
+        swap(deadline_, rhs.deadline_);
+        swap(timer_id_, rhs.timer_id_);
+        swap(timer_svc_, rhs.timer_svc_);
+    }
+
+    Promise promise_;
+    std::chrono::milliseconds timeout_;
+    std::chrono::time_point<std::chrono::steady_clock> deadline_;
+
+    std::optional<TimerId> timer_id_;
+    // Valid only when timer_id_.has_value() is true.
+    TimerService* timer_svc_;
+};
 } // namespace internal
 
 /// # Brief
@@ -637,6 +694,7 @@ private:
 /// - `orElse()`: Invoked only on error. Propagates values automatically.
 /// - `inspect()`: Invoked with the result for side effects, without consuming or modifying the result.
 /// - `discard()`: Ignores the result and returns a successful void result.
+/// - `timeout()`: Wraps the promise with a deadline, failing if it's not met.
 ///
 /// # Continuations and handlers
 ///
@@ -855,6 +913,27 @@ public:
     /// failed.
     auto discard() {
         return withContinuation(internal::DiscardContinuation<PromiseImpl>(std::move(*this)));
+    }
+
+    /// Returns a new promise that wraps this promise with a timeout.
+    ///
+    /// If this promise does not complete within the specified `timeout` duration, the new promise will complete with
+    /// an error of `ETIMEDOUT`. If this promise completes before the timeout, its result is propagated.
+    ///
+    /// The error type of the resulting promise will be `int`. If the original promise fails with a non-`int`
+    /// error, that error will be discarded and the timeout promise will fail with a generic error code.
+    ///
+    /// This combinator requires the `Executor` that runs the promise to implement the `TimerService` interface. If
+    /// the executor does not support it, the promise will fail at runtime with an error of `ENOSYS`.
+    ///
+    /// ```cpp
+    /// // This promise will time out after 100ms.
+    /// makePromise([](Context& ctx) -> Result<void, int> {
+    ///     return Pending{};
+    /// }).timeout(std::chrono::milliseconds(100));
+    /// ```
+    auto timeout(std::chrono::milliseconds timeout) {
+        return withContinuation(internal::TimeoutContinuation<PromiseImpl>(std::move(*this), timeout));
     }
 
     /// Wraps the promise using the provided wrapper.
@@ -1517,6 +1596,65 @@ public:
 private:
     RefPtr<WakerImpl> impl_;
 };
+
+/// An abstract interface for timer services that can be implemented by an `Executor`.
+///
+/// Any `Executor` that needs to support the `promise.timeout()` combinator must implement this interface. The
+/// implementation is discovered at runtime via `dynamic_cast`.
+class TimerService {
+public:
+    virtual ~TimerService() = default;
+
+    /// Returns the current time from a monotonic clock.
+    ///
+    /// This should be immune to system time changes.
+    virtual std::chrono::time_point<std::chrono::steady_clock> currentTime() const = 0;
+
+    /// Registers a timer to wake a task after a specified duration.
+    virtual TimerId addTimer(std::chrono::milliseconds timeout, Waker waker) = 0;
+
+    /// Deregisters a timer.
+    virtual void cancelTimer(TimerId id) = 0;
+};
+
+namespace internal {
+template <typename Promise>
+TimeoutContinuation<Promise>::~TimeoutContinuation() {
+    if (timer_id_) {
+        timer_svc_->cancelTimer(*timer_id_);
+    }
+}
+
+template <typename Promise>
+TimeoutContinuation<Promise>::ResultType TimeoutContinuation<Promise>::operator()(Context& ctx) {
+    auto* timer_svc = dynamic_cast<TimerService*>(ctx.executor());
+    if (timer_svc == nullptr) {
+        // The executor does not implement the required TimerService.
+        return Err(ENOSYS);
+    }
+
+    // On the first poll, initialize the deadline and register the timer with the executor.
+    if (!timer_id_) {
+        timer_svc_ = timer_svc;
+        deadline_ = timer_svc->currentTime() + timeout_;
+        timer_id_.emplace(timer_svc->addTimer(timeout_, ctx.waker()));
+    }
+
+    // Poll the underlying promise.
+    if (auto result = promise_(ctx)) {
+        // The underlying promise completed.
+        // The `TimeoutContinuation` will now be destroyed. This implicitly cancels the timer in the `TimerService`.
+        return result;
+    }
+
+    // The underlying promise is still pending. Check if the deadline has been reached.
+    if (timer_svc->currentTime() >= deadline_) {
+        return Err(ETIMEDOUT);
+    }
+    return Pending{};
+}
+} // namespace internal
+
 } // namespace hcomm
 
 #endif // HCOMM_PROMISE_PROMISE_HPP_

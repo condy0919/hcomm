@@ -40,24 +40,28 @@ class IOExecutor::ScheduledTaskNode : public WakerImpl, public Context {
 public:
     ScheduledTaskNode(IOExecutor* exec, PendingTask task) : executor_(exec), task_(std::move(task)) {}
 
-    // waker impl
+    // WakerImpl implementation
 
+    /// Re-enqueues the task into the executor's ready queue.
     void wake() override {
         if (executor_) {
             executor_->reschedule(static_pointer_cast<ScheduledTaskNode>(shared_from_this()));
         }
     }
 
-    // context impl
+    // Context implementation
 
+    /// Returns the executor driving this task.
     Executor* executor() override {
         return executor_;
     }
 
+    /// Returns a waker associated with this task node.
     Waker waker() override {
         return Waker(shared_from_this());
     }
 
+    /// Executes the underlying task.
     bool run() {
         return task_(*this);
     }
@@ -67,16 +71,10 @@ private:
     PendingTask task_;
 };
 
-/// The core component of `IOExecutor` that manages I/O events and task scheduling.
+/// The internal implementation of IOExecutor, managing the event loop and scheduling.
 ///
-/// This class encapsulates the `epoll` file descriptor, a notification mechanism (`eventfd`), and a queue of
-/// ready-to-run tasks. It is responsible for:
-/// 1. Monitoring file descriptors for I/O events using `epoll`.
-/// 2. Waking tasks when their corresponding I/O events occur.
-/// 3. Managing a queue of tasks that are ready to be executed.
-/// 4. Providing a mechanism to wake up the event loop from another thread (`notify`).
-///
-/// The `loop()` method runs the central event-processing loop.
+/// Dispatcher handles I/O multiplexing via epoll, inter-thread notification through eventfd, and timer management
+/// using a priority queue.
 class IOExecutor::Dispatcher {
 public:
     Dispatcher(IOExecutor* exec) : executor_(exec) {
@@ -92,9 +90,10 @@ public:
         }
         notify_fd_.reset(notify_fd);
 
-        struct epoll_event interest;
-        interest.events = EPOLLIN;
-        interest.data.ptr = nullptr;
+        struct epoll_event interest = {
+            .events = EPOLLIN,
+            .data = {.u64 = 0},
+        };
         ::epoll_ctl(epfd, EPOLL_CTL_ADD, notify_fd, &interest);
     }
 
@@ -102,22 +101,26 @@ public:
         stop();
     }
 
+    /// Wakes up the epoll loop from another thread.
     void notify() {
         eventfd_t value = 1;
         ::eventfd_write(notify_fd_.get(), value);
     }
 
+    /// Schedules a task for execution in the next event loop iteration.
     void schedule(PendingTask task) {
         auto node = makeRef<ScheduledTaskNode>(executor_, std::move(task));
         reschedule(std::move(node));
     }
 
+    /// Threads-safely adds a task node back to the ready queue.
     void reschedule(RefPtr<ScheduledTaskNode> node) {
         std::lock_guard lock(mtx_);
         ready_queue_.push(std::move(node));
         notify();
     }
 
+    /// Registers a waker for readability events.
     void registerReadWaker(ResourceId id, Waker waker) {
         IORegistration* reg = registry_.get(id);
         if (reg == nullptr) {
@@ -127,6 +130,7 @@ public:
         reg->read_waker = std::move(waker);
     }
 
+    /// Registers a waker for writability events.
     void registerWriteWaker(ResourceId id, Waker waker) {
         IORegistration* reg = registry_.get(id);
         if (reg == nullptr) {
@@ -136,6 +140,7 @@ public:
         reg->write_waker = std::move(waker);
     }
 
+    /// Registers a file descriptor with epoll for event monitoring.
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     std::expected<ResourceId, int> registerEvent(int fd, std::uint32_t events) {
         auto allocation = registry_.alloc(fd, events);
@@ -157,25 +162,85 @@ public:
         return id;
     }
 
+    /// Removes an I/O registration.
     void deregister(int fd, ResourceId id) {
         ::epoll_ctl(epfd_.get(), EPOLL_CTL_DEL, fd, nullptr);
         registry_.free(id);
     }
 
+    /// Returns the steady clock snapshot from the current loop iteration.
+    std::chrono::time_point<std::chrono::steady_clock> currentTime() const {
+        return current_time_;
+    }
+
+    /// Schedules a timer and returns its unique ID.
+    TimerId addTimer(std::chrono::milliseconds timeout, Waker waker) {
+        auto allocation = timer_pool_.alloc(std::move(waker));
+        if (!allocation) {
+            // Resource pool exhausted.
+            throw std::bad_alloc();
+        }
+
+        TimerHeapNode node = {
+            .deadline = currentTime() + timeout,
+            .id = static_cast<TimerId>(allocation->id),
+        };
+
+        try {
+            timer_heap_.push(node);
+        } catch (...) {
+            // Roll back resource pool allocation.
+            timer_pool_.free(allocation->id);
+            throw;
+        }
+
+        return static_cast<TimerId>(allocation->id);
+    }
+
+    /// Marks a timer as cancelled.
+    void cancelTimer(TimerId id) {
+        timer_pool_.free(ResourceId(id));
+    }
+
+    /// Requests the event loop to terminate.
     void stop() {
         stop_ = true;
     }
 
-    /// Runs the main event loop, which is the heart of the `IOExecutor`.
+    /// The central execution loop of the IOExecutor.
     ///
-    /// This blocking function continuously checks for and processes work. In each iteration, it first runs all tasks
-    /// that are ready to execute. Then, it waits for new I/O events using `epoll_wait`. When an event occurs, it
-    /// wakes the corresponding task (e.g., a read or write operation) so it can be executed in a future iteration. The
-    /// loop also handles external notifications that wake it up to process newly scheduled tasks.
+    /// The loop operates in several distinct phases to ensure fairness and efficiency:
+    ///
+    /// 1. **Task Execution Phase**: It first captures all currently ready tasks by swapping the `ready_queue_` into a
+    ///    local queue. This batching prevents "ready-task starvation," where a task that immediately reschedules
+    ///    itself could otherwise prevent the loop from ever reaching the I/O polling phase.
+    ///
+    /// 2. **Timer Preparation Phase**: It lazily removes any invalidated (cancelled) timers from the top of the
+    ///    priority queue. This ensures that the subsequent timeout calculation for `epoll_wait` is based on the
+    ///    earliest valid timer.
+    ///
+    /// 3. **I/O Polling Phase**: It calculates a poll timeout based on the deadline of the nearest timer. If no timers
+    ///    exist, it blocks indefinitely; if a timer has already expired, it performs a non-blocking poll. The
+    ///    `epoll_wait` call monitors both external I/O events and the internal `eventfd` used for cross-thread
+    ///    notifications.
+    ///
+    /// 4. **Event Dispatch Phase**:
+    ///    - If the `eventfd` is signaled, it clears the notification to allow future wakes.
+    ///    - For socket events, it retrieves the `IORegistration` and invokes the appropriate `read_waker` or
+    ///      `write_waker`. Waking a task moves it to the `ready_queue_` for execution in the next iteration.
+    ///
+    /// 5. **Timer Expiration Phase**: Finally, it updates the cached time and processes all timers whose deadlines
+    ///    have passed, invoking their associated wakers.
+    ///
+    /// Throughout the loop, `current_time_` is strategically updated to provide a consistent and efficient time
+    /// snapshot for all operations within a single iteration.
     void loop() {
         std::array<struct epoll_event, 128> evs;
         while (!stop_) {
-            // Prevent new tasks from being generated during the processing of the current batch.
+            // Set current time.
+            current_time_ = std::chrono::steady_clock::now();
+
+            // Run ready tasks in a separate batch to avoid re-scheduling starvation.
             std::queue<RefPtr<ScheduledTaskNode>> q;
             {
                 std::lock_guard lock(mtx_);
@@ -188,18 +253,40 @@ public:
                 task->run();
             }
 
-            const int num = ::epoll_wait(epfd_.get(), evs.data(), evs.size(), -1);
+            // Remove invalidated timers before calculating poll timeout.
+            while (!timer_heap_.empty()) {
+                if (!timer_pool_.valid(ResourceId(timer_heap_.top().id))) {
+                    timer_heap_.pop();
+                } else {
+                    break;
+                }
+            }
+
+            // Refresh current time.
+            current_time_ = std::chrono::steady_clock::now();
+
+            // Compute wait duration based on the nearest timer.
+            int timeout_ms = -1;
+            if (!timer_heap_.empty()) {
+                std::chrono::milliseconds diff(0);
+                if (timer_heap_.top().deadline > current_time_) {
+                    diff = std::chrono::ceil<std::chrono::milliseconds>(timer_heap_.top().deadline - current_time_);
+                }
+
+                timeout_ms = static_cast<int>(diff.count());
+            }
+
+            const int num = ::epoll_wait(epfd_.get(), evs.data(), evs.size(), timeout_ms);
             if (num < 0) {
                 if (errno == EINTR) {
                     continue;
                 }
-
                 break;
             }
 
             for (std::size_t i = 0; i < static_cast<std::size_t>(num); ++i) {
                 // Someone called `notify()` in other thread.
-                if (evs[i].data.ptr == nullptr) {
+                if (evs[i].data.u64 == 0) {
                     eventfd_t value = 0;
                     ::eventfd_read(notify_fd_.get(), &value);
                     continue;
@@ -225,17 +312,70 @@ public:
                     waker.wake();
                 }
             }
+
+            // Process expired timers.
+            while (!timer_heap_.empty()) {
+                const auto& timer = timer_heap_.top();
+
+                // The timer ID might have been cancelled.
+                if (!timer_pool_.valid(ResourceId(timer.id))) {
+                    timer_heap_.pop();
+                    continue;
+                }
+
+                // Check if the timer has expired.
+                if (timer.deadline > current_time_) {
+                    break;
+                }
+
+                // The timer has expired.
+                TimerPayload* payload = timer_pool_.get(ResourceId(timer.id));
+                if (payload) [[likely]] {
+                    auto waker = std::move(payload->waker);
+                    TimerId id_to_free = timer.id;
+
+                    timer_heap_.pop();
+                    timer_pool_.free(ResourceId(id_to_free));
+
+                    waker.wake();
+                } else {
+                    timer_heap_.pop();
+                }
+            }
         }
     }
 
 private:
+    struct TimerPayload {
+        Waker waker;
+    };
+    static_assert(std::is_nothrow_constructible_v<TimerPayload, Waker>,
+                  "Ensure the TimerPayload won't throw exception in ctor");
+
+    struct TimerHeapNode {
+        std::chrono::time_point<std::chrono::steady_clock> deadline;
+        TimerId id;
+
+        bool operator>(const TimerHeapNode& rhs) const {
+            if (deadline != rhs.deadline) {
+                return deadline > rhs.deadline;
+            }
+            return id > rhs.id;
+        }
+    };
+
     bool stop_ = false;
     UniqueFd epfd_;
     UniqueFd notify_fd_;
     IOExecutor* executor_;
+
     std::mutex mtx_;
     std::queue<RefPtr<ScheduledTaskNode>> ready_queue_;
     PagedResourcePool<IORegistration> registry_;
+
+    std::chrono::time_point<std::chrono::steady_clock> current_time_;
+    PagedResourcePool<TimerPayload> timer_pool_;
+    std::priority_queue<TimerHeapNode, std::vector<TimerHeapNode>, std::greater<TimerHeapNode>> timer_heap_;
 };
 
 IOExecutor::IOExecutor() : dispatcher_(std::make_unique<Dispatcher>(this)) {}
@@ -270,6 +410,18 @@ std::expected<ResourceId, int> IOExecutor::registerEvent(int fd, std::uint32_t e
 
 void IOExecutor::deregister(int fd, ResourceId id) {
     dispatcher_->deregister(fd, id);
+}
+
+std::chrono::time_point<std::chrono::steady_clock> IOExecutor::currentTime() const {
+    return dispatcher_->currentTime();
+}
+
+TimerId IOExecutor::addTimer(std::chrono::milliseconds timeout, Waker waker) {
+    return dispatcher_->addTimer(timeout, std::move(waker));
+}
+
+void IOExecutor::cancelTimer(TimerId id) {
+    dispatcher_->cancelTimer(id);
 }
 
 void IOExecutor::reschedule(RefPtr<ScheduledTaskNode> node) {

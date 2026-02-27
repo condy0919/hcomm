@@ -47,7 +47,7 @@ private:
 ///
 /// executor.loop();
 /// ```
-class IOExecutor : public Executor {
+class IOExecutor : public Executor, public TimerService {
 public:
     /// Constructs an `IOExecutor`.
     ///
@@ -109,6 +109,26 @@ public:
 
     /// Deregisters all event notifications for a given file descriptor.
     void deregister(int fd, ResourceId id);
+
+    /// Returns a cached snapshot of the current steady clock time.
+    ///
+    /// This time is updated at key points during the event loop (e.g., at the start of an iteration and after
+    /// `epoll_wait`). Using this cached value is more efficient than calling `steady_clock::now()` repeatedly and
+    /// ensures a consistent time view within a single processing step. Note that this may lag behind the actual
+    /// time if a task has been executing for a significant duration.
+    std::chrono::time_point<std::chrono::steady_clock> currentTime() const override;
+
+    /// Registers a timer that will wake up the provided waker after the specified timeout.
+    ///
+    /// The timer is automatically cancelled if it expires or if it is manually cancelled via `cancelTimer`.
+    ///
+    /// Returns a unique `TimerId` that can be used to cancel the timer.
+    TimerId addTimer(std::chrono::milliseconds timeout, Waker waker) override;
+
+    /// Cancels a previously registered timer.
+    ///
+    /// If the timer has already expired or been cancelled, this operation does nothing.
+    void cancelTimer(TimerId id) override;
 
 private:
     class Dispatcher;
