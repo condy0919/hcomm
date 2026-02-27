@@ -26,7 +26,7 @@ Result<RefPtr<Socket>, NetworkError> AcceptContinuation::operator()(Context& ctx
     int cfd = ::accept4(listener_->fd(), nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
     if (cfd < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // wakeup laster
+            // wakeup later
             exec->waitForRead(listener_->id(), ctx.waker());
             return Pending{};
         }
@@ -40,6 +40,110 @@ Result<RefPtr<Socket>, NetworkError> AcceptContinuation::operator()(Context& ctx
             ufd.release();
             return sock;
         });
+}
+
+/// Attempts to read data from the socket.
+///
+/// Returns the number of bytes read, or an error. If the operation would block, it registers for read events and
+/// returns `Pending`.
+Result<ssize_t, NetworkError> ReadContinuation::operator()(Context& ctx) {
+    auto* exec = reinterpret_cast<IOExecutor*>(ctx.executor());
+
+    ssize_t nread = ::read(sk_->fd(), buf_.data(), buf_.size());
+    if (nread < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // Socket is not ready, register a waker to be notified when it is.
+            exec->waitForRead(sk_->id(), ctx.waker());
+            return Pending{};
+        }
+        return Err(errno);
+    } else if (nread == 0) {
+        return Err(NetworkError::kEOF);
+    }
+    return Ok(nread);
+}
+
+/// Repeatedly attempts to read data until the entire buffer is full.
+///
+/// This stateful continuation tracks the `offset_` of data already read. If a read would block, it suspends and waits
+/// for more data.
+Result<void, NetworkError> ReadExactContinuation::operator()(Context& ctx) {
+    auto* exec = reinterpret_cast<IOExecutor*>(ctx.executor());
+    if (buf_.empty()) {
+        return Ok();
+    }
+
+    while (offset_ < buf_.size()) {
+        ssize_t nread = ::recv(sk_->fd(), buf_.data() + offset_, buf_.size() - offset_, 0);
+        if (nread > 0) {
+            offset_ += static_cast<std::uint32_t>(nread);
+        } else if (nread == 0) {
+            // Peer closed the connection while we were expecting more data.
+            return Err(NetworkError::kUnexpectedEOF);
+        } else {
+            if (errno == EINTR) {
+                // Interrupted by signal, retry immediately.
+                continue;
+            } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Socket buffer empty, register for more read events.
+                exec->waitForRead(sk_->id(), ctx.waker());
+                return Pending{};
+            }
+            return Err(errno);
+        }
+    }
+
+    return Ok();
+}
+
+/// Attempts to write data from the buffer to the socket.
+///
+/// Returns the number of bytes written, or an error. If the operation would block, it registers for write events and
+/// returns `Pending`.
+Result<ssize_t, NetworkError> WriteContinuation::operator()(Context& ctx) {
+    auto* exec = reinterpret_cast<IOExecutor*>(ctx.executor());
+
+    ssize_t nwrite = ::write(sk_->fd(), buf_.data(), buf_.size());
+    if (nwrite < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // Socket buffer is full, register a waker to be notified when space is available.
+            exec->waitForWrite(sk_->id(), ctx.waker());
+            return Pending{};
+        }
+        return Err(errno);
+    }
+    return Ok(nwrite);
+}
+
+/// Repeatedly attempts to write data until the entire buffer is sent.
+///
+/// This stateful continuation tracks the `offset_` of data already written. If a write would block, it suspends and
+/// waits for the socket to become writable again.
+Result<void, NetworkError> WriteAllContinuation::operator()(Context& ctx) {
+    auto* exec = reinterpret_cast<IOExecutor*>(ctx.executor());
+    if (buf_.empty()) {
+        return Ok();
+    }
+
+    while (offset_ < buf_.size()) {
+        // MSG_NOSIGNAL prevents SIGPIPE if the peer closes the connection.
+        ssize_t nwrite = ::send(sk_->fd(), buf_.data() + offset_, buf_.size() - offset_, MSG_NOSIGNAL);
+        if (nwrite >= 0) {
+            offset_ += nwrite;
+        } else {
+            if (errno == EINTR) {
+                // Interrupted by signal, retry immediately.
+                continue;
+            } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Socket buffer full, register for more write events.
+                exec->waitForWrite(sk_->id(), ctx.waker());
+                return Pending{};
+            } else {
+                return Err(errno);
+            }
+        }
+    }
+    return Ok();
 }
 } // namespace internal
 
@@ -56,11 +160,11 @@ Listener::~Listener() {
 /// Creates a `Listener` by binding to a socket address and preparing it to accept connections.
 ///
 /// This function performs all the necessary steps to set up a listening socket:
-/// 1.  Creates a non-blocking TCP socket (`SOCK_NONBLOCK | SOCK_CLOEXEC`).
-/// 2.  Sets `SO_REUSEADDR` and `SO_REUSEPORT` to allow quick restarts and better load distribution.
-/// 3.  Binds the socket to the specified `SocketAddress`.
-/// 4.  Puts the socket in listening mode with a large backlog queue.
-/// 5.  Registers the listening socket with the `IOExecutor` to monitor for incoming connections (`EPOLLIN`).
+/// 1. Creates a non-blocking TCP socket (`SOCK_NONBLOCK | SOCK_CLOEXEC`).
+/// 2. Sets `SO_REUSEADDR` and `SO_REUSEPORT` to allow quick restarts and better load distribution.
+/// 3. Binds the socket to the specified `SocketAddress`.
+/// 4. Puts the socket in listening mode with a large backlog queue.
+/// 5. Registers the listening socket with the `IOExecutor` to monitor for incoming connections (`EPOLLIN`).
 ///
 /// On success, it returns a `RefPtr` to a new `Listener` object. On failure, it returns an `unexpected` value
 /// containing the error code (errno).

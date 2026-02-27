@@ -3,6 +3,7 @@
 #ifndef HCOMM_TRANSPORT_TCP_SOCKET_HPP_
 #define HCOMM_TRANSPORT_TCP_SOCKET_HPP_
 
+#include <cstdint>
 #include <expected>
 #include <span>
 
@@ -34,6 +35,68 @@ public:
 
 private:
     RefPtr<Listener> listener_;
+};
+
+/// Continuation for a single asynchronous read operation.
+///
+/// It attempts to read data from the socket into the provided buffer. If the socket is not ready for reading, it
+/// registers a waker and returns `Pending`.
+class ReadContinuation {
+public:
+    ReadContinuation(RefPtr<Socket> sk, std::span<char> buf) : sk_(std::move(sk)), buf_(buf) {}
+
+    Result<ssize_t, NetworkError> operator()(Context& ctx);
+
+private:
+    RefPtr<Socket> sk_;
+    std::span<char> buf_;
+};
+
+/// Continuation for an asynchronous read-exact operation.
+///
+/// It continues to read data until the buffer is completely filled. It handles partial reads and `EAGAIN` by storing
+/// the current offset and registering a waker to be resumed when more data is available.
+class ReadExactContinuation {
+public:
+    ReadExactContinuation(RefPtr<Socket> sk, std::span<char> buf) : sk_(std::move(sk)), buf_(buf) {}
+
+    Result<void, NetworkError> operator()(Context& ctx);
+
+private:
+    RefPtr<Socket> sk_;
+    std::span<char> buf_;
+    std::uint32_t offset_ = 0;
+};
+
+/// Continuation for a single asynchronous write operation.
+///
+/// It attempts to write data from the buffer to the socket. If the socket's send buffer is full, it registers a waker
+/// and returns `Pending`.
+class WriteContinuation {
+public:
+    WriteContinuation(RefPtr<Socket> sk, std::span<char> buf) : sk_(std::move(sk)), buf_(buf) {}
+
+    Result<ssize_t, NetworkError> operator()(Context& ctx);
+
+private:
+    RefPtr<Socket> sk_;
+    std::span<char> buf_;
+};
+
+/// Continuation for an asynchronous write-all operation.
+///
+/// It continues to write data until the entire buffer is sent. It handles partial writes and `EAGAIN` by storing the
+/// current offset and registering a waker to be resumed when the socket is writable again.
+class WriteAllContinuation {
+public:
+    WriteAllContinuation(RefPtr<Socket> sk, std::span<char> buf) : sk_(std::move(sk)), buf_(buf) {}
+
+    Result<void, NetworkError> operator()(Context& ctx);
+
+private:
+    RefPtr<Socket> sk_;
+    std::span<char> buf_;
+    std::uint32_t offset_ = 0;
 };
 } // namespace internal
 
@@ -71,21 +134,15 @@ public:
     /// If the read operation cannot complete immediately (returns `EAGAIN`), it registers a waker with the
     /// `IOExecutor` and returns `Pending`. The promise will be resumed when the socket becomes readable again.
     auto read(std::span<char> buf) {
-        return makePromise([buf, this, self = shared_from_this()](Context& ctx) -> Result<ssize_t, NetworkError> {
-            auto* exec = reinterpret_cast<IOExecutor*>(ctx.executor());
+        return PromiseImpl(internal::ReadContinuation(shared_from_this(), buf));
+    }
 
-            ssize_t nread = ::read(fd_.get(), buf.data(), buf.size());
-            if (nread < 0) {
-                if (errno == EAGAIN) {
-                    exec->waitForRead(id(), ctx.waker());
-                    return Pending{};
-                }
-                return Err(errno);
-            } else if (nread == 0) {
-                return Err(NetworkError::kEOF);
-            }
-            return Ok(nread);
-        });
+    /// Asynchronously reads exactly the number of bytes required to fill the buffer.
+    ///
+    /// This method returns a promise that resolves only when the entire buffer is filled. If the peer closes the
+    /// connection before the buffer is full, the promise resolves to `Err(NetworkError::kUnexpectedEOF)`.
+    auto readExact(std::span<char> buf) {
+        return PromiseImpl(internal::ReadExactContinuation(shared_from_this(), buf));
     }
 
     /// Asynchronously writes data from the provided buffer to the socket.
@@ -96,19 +153,15 @@ public:
     /// `IOExecutor` and returns `Pending`. The promise will be resumed when the socket becomes writable again. It is
     /// the caller's responsibility to handle partial writes by calling `write` again with the remaining data.
     auto write(std::span<char> buf) {
-        return makePromise([buf, this, self = shared_from_this()](Context& ctx) -> Result<ssize_t, NetworkError> {
-            auto* exec = reinterpret_cast<IOExecutor*>(ctx.executor());
+        return PromiseImpl(internal::WriteContinuation(shared_from_this(), buf));
+    }
 
-            ssize_t nwrite = ::write(fd_.get(), buf.data(), buf.size());
-            if (nwrite < 0) {
-                if (errno == EAGAIN) {
-                    exec->waitForWrite(id(), ctx.waker());
-                    return Pending{};
-                }
-                return Err(errno);
-            }
-            return Ok(nwrite);
-        });
+    /// Asynchronously writes the entire contents of the buffer to the socket.
+    ///
+    /// This method returns a promise that resolves only when all data in the buffer has been successfully sent. It
+    /// handles partial writes and `EAGAIN` internally.
+    auto writeAll(std::span<char> buf) {
+        return PromiseImpl(internal::WriteAllContinuation(shared_from_this(), buf));
     }
 
 private:
@@ -151,11 +204,7 @@ public:
     ///
     /// If no pending connections are available, it registers a waker with the `IOExecutor` and the promise will be
     /// resumed when a new connection arrives.
-    ///
-    /// The `Listener`'s lifetime is expected to be managed by the server and should outlive any pending `accept`
-    /// operations.
     auto accept() {
-        // The lifetime of a Listener is typically the same as the server's.
         return PromiseImpl(internal::AcceptContinuation(shared_from_this()));
     }
 
