@@ -609,15 +609,13 @@ private:
 };
 
 /// Continuation logic for the `timeout()` combinator.
-template <typename Promise>
+template <typename Promise, typename TimeoutErr>
 class TimeoutContinuation {
 public:
     using ResultType = typename Promise::ResultType;
-    static_assert(std::is_same_v<typename ResultType::ErrorType, int>,
-                  "TimeoutContinuation uses int to represent CANCELLATION/TIMEOUT.");
 
-    TimeoutContinuation(Promise promise, std::chrono::milliseconds timeout)
-        : promise_(std::move(promise)), timeout_(timeout) {}
+    TimeoutContinuation(Promise promise, std::chrono::milliseconds timeout, TimeoutErr on_timeout)
+        : promise_(std::move(promise)), timeout_(timeout), on_timeout_(std::move(on_timeout)) {}
 
     TimeoutContinuation(TimeoutContinuation&& rhs) noexcept
         : promise_(std::move(rhs.promise_)), timeout_(rhs.timeout_), deadline_(rhs.deadline_), timer_id_(rhs.timer_id_),
@@ -651,6 +649,7 @@ private:
 
     Promise promise_;
     std::chrono::milliseconds timeout_;
+    TimeoutErr on_timeout_;
     std::chrono::time_point<std::chrono::steady_clock> deadline_;
 
     std::optional<TimerId> timer_id_;
@@ -932,8 +931,10 @@ public:
     ///     return Pending{};
     /// }).timeout(std::chrono::milliseconds(100));
     /// ```
-    auto timeout(std::chrono::milliseconds timeout) {
-        return withContinuation(internal::TimeoutContinuation<PromiseImpl>(std::move(*this), timeout));
+    template <typename TimeoutErr>
+    auto timeout(std::chrono::milliseconds timeout, TimeoutErr on_timeout) {
+        return withContinuation(
+            internal::TimeoutContinuation<PromiseImpl, TimeoutErr>(std::move(*this), timeout, std::move(on_timeout)));
     }
 
     /// Wraps the promise using the provided wrapper.
@@ -1625,21 +1626,39 @@ public:
     virtual void cancelTimer(TimerId id) = 0;
 };
 
+/// Creates a promise that completes successfully after the specified duration.
+inline auto sleepFor(std::chrono::milliseconds duration) {
+    return makePromise([duration, timer_id = std::optional<TimerId>(),
+                        deadline = std::chrono::steady_clock::time_point()](Context& ctx) mutable -> Result<> {
+        auto* timer_svc = ctx.executor()->timer();
+        assert(timer_svc != nullptr && "Executor MUST implement TimerService to use sleepFor()");
+
+        if (!timer_id) {
+            deadline = timer_svc->currentTime() + duration;
+            timer_id = timer_svc->addTimer(duration, ctx.waker());
+            return Pending{};
+        }
+
+        if (timer_svc->currentTime() >= deadline) {
+            return Ok();
+        }
+        return Pending{};
+    });
+}
+
 namespace internal {
-template <typename Promise>
-TimeoutContinuation<Promise>::~TimeoutContinuation() {
+template <typename Promise, typename TimeoutErr>
+TimeoutContinuation<Promise, TimeoutErr>::~TimeoutContinuation() {
     if (timer_id_) {
         timer_svc_->cancelTimer(*timer_id_);
     }
 }
 
-template <typename Promise>
-TimeoutContinuation<Promise>::ResultType TimeoutContinuation<Promise>::operator()(Context& ctx) {
+template <typename Promise, typename TimeoutErr>
+auto TimeoutContinuation<Promise, TimeoutErr>::operator()(Context& ctx)
+    -> TimeoutContinuation<Promise, TimeoutErr>::ResultType {
     auto* timer_svc = ctx.executor()->timer();
-    if (timer_svc == nullptr) {
-        // The executor does not implement the required TimerService.
-        return Err(ENOSYS);
-    }
+    assert(timer_svc != nullptr && "Executor MUST implement TimerService to use timeout()");
 
     // On the first poll, initialize the deadline and register the timer with the executor.
     if (!timer_id_) {
@@ -1657,7 +1676,7 @@ TimeoutContinuation<Promise>::ResultType TimeoutContinuation<Promise>::operator(
 
     // The underlying promise is still pending. Check if the deadline has been reached.
     if (timer_svc->currentTime() >= deadline_) {
-        return Err(ETIMEDOUT);
+        return Err(on_timeout_);
     }
     return Pending{};
 }
