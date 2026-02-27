@@ -11,6 +11,7 @@
 #include "hcomm/memory/paged_resource_pool.hpp"
 #include "hcomm/promise/promise.hpp"
 #include "hcomm/transport/tcp/address.hpp"
+#include "hcomm/transport/tcp/error.hpp"
 #include "hcomm/transport/tcp/executor.hpp"
 
 namespace hcomm {
@@ -29,7 +30,7 @@ class AcceptContinuation {
 public:
     AcceptContinuation(RefPtr<Listener> listener) : listener_(std::move(listener)) {}
 
-    Result<RefPtr<Socket>, int> operator()(Context& ctx);
+    Result<RefPtr<Socket>, NetworkError> operator()(Context& ctx);
 
 private:
     RefPtr<Listener> listener_;
@@ -64,14 +65,13 @@ public:
 
     /// Asynchronously reads data from the socket into the provided buffer.
     ///
-    /// This method returns a promise that resolves to the number of bytes read, or an error code (errno).
+    /// This method returns a promise that resolves to the number of bytes read, or an error code. When the peer closes
+    /// the connection (EOF), the promise resolves to `Err(NetworkError::kEOF)`.
     ///
     /// If the read operation cannot complete immediately (returns `EAGAIN`), it registers a waker with the
     /// `IOExecutor` and returns `Pending`. The promise will be resumed when the socket becomes readable again.
-    ///
-    /// A result of `Ok(0)` typically indicates that the remote peer has closed the connection (EOF).
     auto read(std::span<char> buf) {
-        return makePromise([buf, this, self = shared_from_this()](Context& ctx) -> Result<ssize_t, int> {
+        return makePromise([buf, this, self = shared_from_this()](Context& ctx) -> Result<ssize_t, NetworkError> {
             auto* exec = reinterpret_cast<IOExecutor*>(ctx.executor());
 
             ssize_t nread = ::read(fd_.get(), buf.data(), buf.size());
@@ -81,6 +81,8 @@ public:
                     return Pending{};
                 }
                 return Err(errno);
+            } else if (nread == 0) {
+                return Err(NetworkError::kEOF);
             }
             return Ok(nread);
         });
@@ -94,7 +96,7 @@ public:
     /// `IOExecutor` and returns `Pending`. The promise will be resumed when the socket becomes writable again. It is
     /// the caller's responsibility to handle partial writes by calling `write` again with the remaining data.
     auto write(std::span<char> buf) {
-        return makePromise([buf, this, self = shared_from_this()](Context& ctx) -> Result<ssize_t, int> {
+        return makePromise([buf, this, self = shared_from_this()](Context& ctx) -> Result<ssize_t, NetworkError> {
             auto* exec = reinterpret_cast<IOExecutor*>(ctx.executor());
 
             ssize_t nwrite = ::write(fd_.get(), buf.data(), buf.size());
@@ -132,7 +134,7 @@ public:
     ///
     /// This static method handles the creation of a non-blocking socket, sets reuse address and port options, binds it
     /// to the given `SocketAddress`, and puts it into the listening state.
-    static std::expected<RefPtr<Listener>, int> bind(IOExecutor* exec, const SocketAddress& sa);
+    static std::expected<RefPtr<Listener>, NetworkError> bind(IOExecutor* exec, const SocketAddress& sa);
 
     int fd() const {
         return fd_.get();

@@ -10,23 +10,19 @@ using namespace hcomm;
 void echoLoop(RefPtr<tcp::Socket>& sk, const std::shared_ptr<std::string>& buf, tcp::IOExecutor* exec) {
     exec->schedule(sk->read(*buf)
                        .timeout(std::chrono::seconds(10), ETIMEDOUT)
-                       .orElse([](int& err) -> Result<ssize_t, int> {
-                           HCOMM_LOG_WARN("timed-out! There is no byte received within 10s");
+                       .orElse([sk](tcp::NetworkError& err) -> Result<ssize_t, tcp::NetworkError> {
+                           if (err == ETIMEDOUT) {
+                               HCOMM_LOG_WARN("timed-out! There is no byte received within 10s");
+                           } else if (err == tcp::NetworkError::kEOF) {
+                               HCOMM_LOG_INFO("client closed connection fd={}", sk->fd());
+                           }
                            return Err(err);
                        })
                        .andThen([sk, buf, exec](ssize_t& nread) mutable {
-                           return either(
-                               nread > 0,
-                               [sk, buf, nread]() {
-                                   HCOMM_LOG_INFO("read {} bytes from fd={}", nread, sk->fd());
-                                   return sk->write(std::span<char>(buf->data(), nread));
-                               },
-                               [sk]() {
-                                   HCOMM_LOG_INFO("client closed connection fd={}", sk->fd());
-                                   return makeResultPromise<ssize_t, int>(Ok(-1));
-                               });
+                           HCOMM_LOG_INFO("read {} bytes from fd={}", nread, sk->fd());
+                           return sk->write(std::span<char>(buf->data(), nread));
                        })
-                       .andThen([sk, buf, exec](ssize_t& nwrite) mutable -> Result<void, int> {
+                       .andThen([sk, buf, exec](ssize_t& nwrite) mutable -> Result<void, tcp::NetworkError> {
                            if (nwrite > 0) {
                                HCOMM_LOG_INFO("write {} bytes to fd={}", nwrite, sk->fd());
                                echoLoop(sk, buf, exec);
@@ -37,14 +33,14 @@ void echoLoop(RefPtr<tcp::Socket>& sk, const std::shared_ptr<std::string>& buf, 
 
 void acceptLoop(RefPtr<tcp::Listener> listener, tcp::IOExecutor* exec) {
     exec->schedule(listener->accept()
-                       .andThen([listener, exec](RefPtr<tcp::Socket>& sk) mutable -> Result<void, int> {
+                       .andThen([listener, exec](RefPtr<tcp::Socket>& sk) mutable -> Result<void, tcp::NetworkError> {
                            HCOMM_LOG_INFO("accept new connection fd={}", sk->fd());
                            echoLoop(sk, std::make_shared<std::string>(1024, '\0'), exec);
                            acceptLoop(listener, exec);
                            return Ok();
                        })
-                       .orElse([listener, exec](int& err) mutable -> Result<> {
-                           HCOMM_LOG_ERROR("Accept failed with errno: {}, try again.", err);
+                       .orElse([listener, exec](tcp::NetworkError& err) mutable -> Result<> {
+                           HCOMM_LOG_ERROR("Accept failed with errno: {}, try again.", static_cast<int>(err));
                            acceptLoop(listener, exec);
                            return Ok();
                        })

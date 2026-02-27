@@ -615,11 +615,11 @@ public:
     using ResultType = typename Promise::ResultType;
 
     TimeoutContinuation(Promise promise, std::chrono::milliseconds timeout, TimeoutErr on_timeout)
-        : promise_(std::move(promise)), timeout_(timeout), on_timeout_(std::move(on_timeout)) {}
+        : promise_(std::move(promise)), timeout_(timeout), on_timeout_(on_timeout) {}
 
     TimeoutContinuation(TimeoutContinuation&& rhs) noexcept
-        : promise_(std::move(rhs.promise_)), timeout_(rhs.timeout_), deadline_(rhs.deadline_), timer_id_(rhs.timer_id_),
-          timer_svc_(rhs.timer_svc_) {
+        : promise_(std::move(rhs.promise_)), timeout_(rhs.timeout_), on_timeout_(rhs.on_timeout_),
+          deadline_(rhs.deadline_), timer_id_(rhs.timer_id_), timer_svc_(rhs.timer_svc_) {
         rhs.timer_id_.reset();
     }
 
@@ -929,12 +929,12 @@ public:
     /// // This promise will time out after 100ms.
     /// makePromise([](Context& ctx) -> Result<void, int> {
     ///     return Pending{};
-    /// }).timeout(std::chrono::milliseconds(100));
+    /// }).timeout(std::chrono::milliseconds(100), ETIMEDOUT);
     /// ```
     template <typename TimeoutErr>
     auto timeout(std::chrono::milliseconds timeout, TimeoutErr on_timeout) {
         return withContinuation(
-            internal::TimeoutContinuation<PromiseImpl, TimeoutErr>(std::move(*this), timeout, std::move(on_timeout)));
+            internal::TimeoutContinuation<PromiseImpl, TimeoutErr>(std::move(*this), timeout, on_timeout));
     }
 
     /// Wraps the promise using the provided wrapper.
@@ -1608,8 +1608,8 @@ private:
 
 /// An abstract interface for timer services that can be implemented by an `Executor`.
 ///
-/// Any `Executor` that needs to support the `promise.timeout()` combinator must implement this interface. The
-/// implementation is discovered at runtime via `dynamic_cast`.
+/// Any `Executor` that needs to support the `promise.timeout()` combinator or `sleepFor` must implement this
+/// interface.
 class TimerService {
 public:
     virtual ~TimerService() = default;

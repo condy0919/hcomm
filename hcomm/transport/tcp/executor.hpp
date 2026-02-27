@@ -10,6 +10,7 @@
 #include "hcomm/base/refptr.hpp"
 #include "hcomm/memory/paged_resource_pool.hpp"
 #include "hcomm/promise/promise.hpp"
+#include "hcomm/transport/tcp/error.hpp"
 
 namespace hcomm {
 namespace tcp {
@@ -112,7 +113,7 @@ public:
     /// On success, it returns a `ResourceId`, which is a handle that uniquely identifies this registration. This ID is
     /// required for subsequent operations like `waitForRead`, `waitForWrite`, and `deregister`. On failure, it returns
     /// an error code (errno).
-    std::expected<ResourceId, int> registerEvent(int fd, std::uint32_t events);
+    std::expected<ResourceId, NetworkError> registerEvent(int fd, std::uint32_t events);
 
     /// Deregisters all event notifications for a given file descriptor.
     void deregister(int fd, ResourceId id);

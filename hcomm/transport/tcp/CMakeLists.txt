@@ -9,6 +9,7 @@ target_sources(hcomm
 if(HCOMM_BUILD_TESTS)
   add_executable(hcomm_tcp_test
     address_test.cpp
+    error_test.cpp
   )
   target_link_libraries(hcomm_tcp_test
     PRIVATE

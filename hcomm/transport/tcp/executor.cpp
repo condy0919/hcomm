@@ -142,7 +142,7 @@ public:
 
     /// Registers a file descriptor with epoll for event monitoring.
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-    std::expected<ResourceId, int> registerEvent(int fd, std::uint32_t events) {
+    std::expected<ResourceId, NetworkError> registerEvent(int fd, std::uint32_t events) {
         auto allocation = registry_.alloc(fd, events);
         if (!allocation) {
             return std::unexpected(ENOMEM);
@@ -404,7 +404,7 @@ void IOExecutor::waitForWrite(ResourceId id, Waker waker) {
     dispatcher_->registerWriteWaker(id, std::move(waker));
 }
 
-std::expected<ResourceId, int> IOExecutor::registerEvent(int fd, std::uint32_t events) {
+std::expected<ResourceId, NetworkError> IOExecutor::registerEvent(int fd, std::uint32_t events) {
     return dispatcher_->registerEvent(fd, events);
 }
 

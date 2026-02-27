@@ -19,7 +19,7 @@ namespace internal {
 /// If no connections are pending (`EAGAIN` or `EWOULDBLOCK`), it registers a waker to be notified when a new
 /// connection arrives.
 /// Returns a `Socket` on success, an error code on failure, or `Pending` if the operation would block.
-Result<RefPtr<Socket>, int> AcceptContinuation::operator()(Context& ctx) {
+Result<RefPtr<Socket>, NetworkError> AcceptContinuation::operator()(Context& ctx) {
     IOExecutor* exec = static_cast<IOExecutor*>(ctx.executor());
 
     // accept
@@ -64,7 +64,7 @@ Listener::~Listener() {
 ///
 /// On success, it returns a `RefPtr` to a new `Listener` object. On failure, it returns an `unexpected` value
 /// containing the error code (errno).
-std::expected<RefPtr<Listener>, int> Listener::bind(IOExecutor* exec, const SocketAddress& sa) {
+std::expected<RefPtr<Listener>, NetworkError> Listener::bind(IOExecutor* exec, const SocketAddress& sa) {
     // nonblocking by default
     int fd = ::socket(sa.ip().family(), SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0) {
