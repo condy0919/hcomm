@@ -152,6 +152,13 @@ Socket::~Socket() {
     executor_->deregister(fd_.get(), res_id_);
 }
 
+std::expected<void, NetworkError> Socket::shutdown(int how) {
+    if (::shutdown(fd_, how) < 0) {
+        return std::unexpected(errno);
+    }
+    return {};
+}
+
 /// Deregisters the listener from the executor upon destruction.
 Listener::~Listener() {
     executor_->deregister(fd_.get(), res_id_);

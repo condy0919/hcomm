@@ -164,6 +164,25 @@ public:
         return PromiseImpl(internal::WriteAllContinuation(shared_from_this(), buf));
     }
 
+    /// Shuts down part of a full-duplex connection.
+    ///
+    /// This method provides a mechanism for graceful termination of the TCP connection. Unlike closing the socket,
+    /// `shutdown` can close one direction of the connection while keeping the other open.
+    ///
+    /// To perform a graceful close:
+    /// 1. Call `shutdown(SHUT_WR)` to signal EOF to the peer, indicating that no more data will be sent.
+    /// 2. Continue to `read` from the socket until `NetworkError::kEOF` is received. This confirms the peer has
+    ///    received all data and has also finished its transmission.
+    /// 3. Destroy the `Socket` object to release system resources.
+    ///
+    /// This procedure prevents potential data loss and TCP Reset (RST) errors that can occur when a socket is
+    /// closed while unread data remains in the receive buffer.
+    ///
+    /// The `how` parameter (typically `SHUT_RD`, `SHUT_WR`, or `SHUT_RDWR` from `<sys/socket.h>`) specifies which part
+    /// of the connection to shut down. `SHUT_WR` is the most common choice for initiating a graceful close as it
+    /// sends a FIN packet to the peer.
+    std::expected<void, NetworkError> shutdown(int how);
+
 private:
     UniqueFd fd_;
     ResourceId res_id_;
