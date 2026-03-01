@@ -1461,6 +1461,11 @@ public:
     PendingTask(PendingTask&& rhs) noexcept = default;
     PendingTask& operator=(PendingTask&& rhs) noexcept = default;
 
+    /// Resets the pending task to an empty state, discarding the underlying promise.
+    void reset() {
+        promise_ = nullptr;
+    }
+
     /// Returns if the pending task is non-empty (has a valid promise).
     explicit operator bool() const {
         return static_cast<bool>(promise_);
