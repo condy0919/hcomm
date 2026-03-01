@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <expected>
 #include <span>
+#include <utility>
 
 #include "hcomm/base/refptr.hpp"
 #include "hcomm/base/unique_fd.hpp"
@@ -23,6 +24,47 @@ class IOExecutor;
 class Listener;
 
 namespace internal {
+enum class CancelType : std::uint8_t {
+    kRead,
+    kWrite,
+};
+
+/// A mixin that provides RAII-based cancellation for asynchronous continuations.
+///
+/// If a continuation is destroyed while it is still waiting for an I/O event (e.g., due to a timeout or promise
+/// cancellation), this class ensures that the pending operation is explicitly cancelled in the `IOExecutor`. This
+/// prevents "dangling wakers" from remaining in the executor's registry.
+template <typename T, CancelType Type>
+class Cancellable {
+public:
+    Cancellable() = default;
+
+    Cancellable(Cancellable&& rhs) noexcept : is_waiting_(std::exchange(rhs.is_waiting_, false)) {}
+
+    Cancellable& operator=(Cancellable&& rhs) noexcept {
+        is_waiting_ = std::exchange(rhs.is_waiting_, false);
+        return *this;
+    }
+
+    ~Cancellable() {
+        if (is_waiting_) {
+            T* self = static_cast<T*>(this);
+            if constexpr (Type == CancelType::kRead) {
+                self->sk_->cancelRead();
+            } else {
+                self->sk_->cancelWrite();
+            }
+        }
+    }
+
+    void waiting(bool b) {
+        is_waiting_ = b;
+    }
+
+protected:
+    bool is_waiting_ = false;
+};
+
 /// The continuation part of the `accept` promise.
 ///
 /// This class encapsulates the logic for a single `accept` attempt. If `accept4` would block, it registers a waker to
@@ -41,7 +83,9 @@ private:
 ///
 /// It attempts to read data from the socket into the provided buffer. If the socket is not ready for reading, it
 /// registers a waker and returns `Pending`.
-class ReadContinuation {
+class ReadContinuation : public Cancellable<ReadContinuation, CancelType::kRead> {
+    friend Cancellable<ReadContinuation, CancelType::kRead>;
+
 public:
     ReadContinuation(RefPtr<Socket> sk, std::span<char> buf) : sk_(std::move(sk)), buf_(buf) {}
 
@@ -56,7 +100,9 @@ private:
 ///
 /// It continues to read data until the buffer is completely filled. It handles partial reads and `EAGAIN` by storing
 /// the current offset and registering a waker to be resumed when more data is available.
-class ReadExactContinuation {
+class ReadExactContinuation : public Cancellable<ReadExactContinuation, CancelType::kRead> {
+    friend Cancellable<ReadExactContinuation, CancelType::kRead>;
+
 public:
     ReadExactContinuation(RefPtr<Socket> sk, std::span<char> buf) : sk_(std::move(sk)), buf_(buf) {}
 
@@ -72,7 +118,9 @@ private:
 ///
 /// It attempts to write data from the buffer to the socket. If the socket's send buffer is full, it registers a waker
 /// and returns `Pending`.
-class WriteContinuation {
+class WriteContinuation : public Cancellable<WriteContinuation, CancelType::kWrite> {
+    friend Cancellable<WriteContinuation, CancelType::kWrite>;
+
 public:
     WriteContinuation(RefPtr<Socket> sk, std::span<char> buf) : sk_(std::move(sk)), buf_(buf) {}
 
@@ -87,7 +135,9 @@ private:
 ///
 /// It continues to write data until the entire buffer is sent. It handles partial writes and `EAGAIN` by storing the
 /// current offset and registering a waker to be resumed when the socket is writable again.
-class WriteAllContinuation {
+class WriteAllContinuation : public Cancellable<WriteAllContinuation, CancelType::kWrite> {
+    friend Cancellable<WriteAllContinuation, CancelType::kWrite>;
+
 public:
     WriteAllContinuation(RefPtr<Socket> sk, std::span<char> buf) : sk_(std::move(sk)), buf_(buf) {}
 
@@ -182,6 +232,20 @@ public:
     /// of the connection to shut down. `SHUT_WR` is the most common choice for initiating a graceful close as it
     /// sends a FIN packet to the peer.
     std::expected<void, NetworkError> shutdown(int how);
+
+    /// Cancels any pending asynchronous read operation on this socket.
+    ///
+    /// This ensures the executor stops monitoring for readability and releases any associated waker handles.
+    void cancelRead() {
+        executor_->cancelRead(id());
+    }
+
+    /// Cancels any pending asynchronous write operation on this socket.
+    ///
+    /// This ensures the executor stops monitoring for writability and releases any associated waker handles.
+    void cancelWrite() {
+        executor_->cancelWrite(id());
+    }
 
 private:
     UniqueFd fd_;

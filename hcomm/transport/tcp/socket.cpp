@@ -54,12 +54,15 @@ Result<ssize_t, NetworkError> ReadContinuation::operator()(Context& ctx) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // Socket is not ready, register a waker to be notified when it is.
             exec->waitForRead(sk_->id(), ctx.waker());
+            waiting(true);
             return Pending{};
         }
         return Err(errno);
     } else if (nread == 0) {
+        waiting(false);
         return Err(NetworkError::kEOF);
     }
+    waiting(false);
     return Ok(nread);
 }
 
@@ -79,6 +82,7 @@ Result<void, NetworkError> ReadExactContinuation::operator()(Context& ctx) {
             offset_ += static_cast<std::uint32_t>(nread);
         } else if (nread == 0) {
             // Peer closed the connection while we were expecting more data.
+            waiting(false);
             return Err(NetworkError::kUnexpectedEOF);
         } else {
             if (errno == EINTR) {
@@ -87,12 +91,15 @@ Result<void, NetworkError> ReadExactContinuation::operator()(Context& ctx) {
             } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 // Socket buffer empty, register for more read events.
                 exec->waitForRead(sk_->id(), ctx.waker());
+                waiting(true);
                 return Pending{};
             }
+            waiting(false);
             return Err(errno);
         }
     }
 
+    waiting(false);
     return Ok();
 }
 
@@ -108,10 +115,13 @@ Result<ssize_t, NetworkError> WriteContinuation::operator()(Context& ctx) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // Socket buffer is full, register a waker to be notified when space is available.
             exec->waitForWrite(sk_->id(), ctx.waker());
+            waiting(true);
             return Pending{};
         }
+        waiting(false);
         return Err(errno);
     }
+    waiting(false);
     return Ok(nwrite);
 }
 
@@ -122,6 +132,7 @@ Result<ssize_t, NetworkError> WriteContinuation::operator()(Context& ctx) {
 Result<void, NetworkError> WriteAllContinuation::operator()(Context& ctx) {
     auto* exec = reinterpret_cast<IOExecutor*>(ctx.executor());
     if (buf_.empty()) {
+        waiting(false);
         return Ok();
     }
 
@@ -137,12 +148,15 @@ Result<void, NetworkError> WriteAllContinuation::operator()(Context& ctx) {
             } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 // Socket buffer full, register for more write events.
                 exec->waitForWrite(sk_->id(), ctx.waker());
+                waiting(true);
                 return Pending{};
             } else {
+                waiting(false);
                 return Err(errno);
             }
         }
     }
+    waiting(false);
     return Ok();
 }
 } // namespace internal

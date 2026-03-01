@@ -99,11 +99,24 @@ public:
     /// promise-based task scheduler.
     void waitForRead(ResourceId id, Waker waker);
 
+    /// Cancels a pending read notification for the specified resource.
+    ///
+    /// This clears the registered read waker for the resource. It is primarily used when a promise waiting for data
+    /// is cancelled or times out, preventing the executor from holding a "dangling waker" that could trigger
+    /// unnecessarily or leak resources.
+    void cancelRead(ResourceId id);
+
     /// Asks the executor to notify the waker when the corresponding resource becomes writable.
     ///
     /// The `writer` waker will be invoked when an I/O event indicates that the resource identified by `id` is ready
     /// for a write operation. This allows tasks to yield until the underlying socket has buffer space available.
     void waitForWrite(ResourceId id, Waker waker);
+
+    /// Cancels a pending write notification for the specified resource.
+    ///
+    /// This clears the registered write waker for the resource. Similar to `cancelRead`, this prevents stale
+    /// notifications for operations that are no longer active.
+    void cancelWrite(ResourceId id);
 
     /// Registers a file descriptor for I/O event monitoring with the executor.
     ///

@@ -63,7 +63,22 @@ public:
 
     /// Executes the underlying task.
     bool run() {
-        return task_(*this);
+        if (!task_) {
+            // This scenario can occur if an operation like `sk.read(...).timeout(10s)` times out. When the timeout
+            // expires, the task completes with ETIMEDOUT, but a stale waker might remain in the IORegistration. If the
+            // socket receives an I/O event before it's destroyed, the executor will attempt to run this waker.
+            //
+            // To prevent these "dangling wakers", continuations like ReadContinuation proactively deregister
+            // themselves upon destruction (see the Cancellable class in socket.hpp).
+            return false;
+        }
+
+        bool done = task_(*this);
+        if (done) {
+            // Task completed; reset the promise chain to release captured resources.
+            task_.reset();
+        }
+        return done;
     }
 
 private:
@@ -400,8 +415,16 @@ void IOExecutor::waitForRead(ResourceId id, Waker waker) {
     dispatcher_->registerReadWaker(id, std::move(waker));
 }
 
+void IOExecutor::cancelRead(ResourceId id) {
+    dispatcher_->registerReadWaker(id, Waker());
+}
+
 void IOExecutor::waitForWrite(ResourceId id, Waker waker) {
     dispatcher_->registerWriteWaker(id, std::move(waker));
+}
+
+void IOExecutor::cancelWrite(ResourceId id) {
+    dispatcher_->registerWriteWaker(id, Waker());
 }
 
 std::expected<ResourceId, NetworkError> IOExecutor::registerEvent(int fd, std::uint32_t events) {
