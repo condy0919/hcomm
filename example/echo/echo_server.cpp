@@ -31,21 +31,28 @@ void echoLoop(RefPtr<tcp::Socket>& sk, const std::shared_ptr<std::string>& buf, 
                        }));
 }
 
-void acceptLoop(RefPtr<tcp::Listener> listener, tcp::IOExecutor* exec) {
-    exec->schedule(listener->accept()
-                       .andThen([listener, exec](RefPtr<tcp::Socket>& sk) mutable -> Result<void, tcp::NetworkError> {
-                           HCOMM_LOG_INFO("accept new connection fd={}", sk->fd());
-                           echoLoop(sk, std::make_shared<std::string>(1024, '\0'), exec);
-                           acceptLoop(listener, exec);
-                           return Ok();
-                       })
-                       .orElse([listener, exec](tcp::NetworkError& err) mutable -> Result<> {
-                           HCOMM_LOG_ERROR("Accept failed with errno: {}, try again.", static_cast<int>(err));
-                           acceptLoop(listener, exec);
-                           return Ok();
-                       })
+void startAcceptor(RefPtr<tcp::Listener> listener, tcp::IOExecutor* exec) {
+    exec->schedule(repeat([listener, exec]() mutable {
+        return listener->accept()
+            .andThen([exec](RefPtr<tcp::Socket>& sk) -> Result<void, tcp::NetworkError> {
+                HCOMM_LOG_INFO("accept new connection fd={}", sk->fd());
+                echoLoop(sk, std::make_shared<std::string>(1024, '\0'), exec);
+                return Ok();
+            })
+            .orElse([listener, exec](tcp::NetworkError& err) -> Result<void, tcp::NetworkError> {
+                int e = static_cast<int>(err);
+                if (e == ECONNABORTED || e == EPROTO) {
+                    HCOMM_LOG_WARN("Accept aborted by peer");
+                    return Ok();
+                } else if (e == EMFILE || e == ENFILE) {
+                    HCOMM_LOG_ERROR("Process ran out of file descriptors!");
+                    return Err(err);
+                }
 
-    );
+                HCOMM_LOG_ERROR("Accept failed with errno: {}, try again.", static_cast<int>(err));
+                return Ok();
+            });
+    }));
 }
 
 int main(int argc, char* argv[]) {
@@ -60,7 +67,7 @@ int main(int argc, char* argv[]) {
     }
 
     auto listener = std::move(result.value());
-    acceptLoop(listener, &exec);
+    startAcceptor(listener, &exec);
 
     HCOMM_LOG_INFO("Server started on 8080..., listen-fd={}", listener->fd());
     exec.loop();
