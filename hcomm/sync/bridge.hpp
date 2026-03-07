@@ -6,6 +6,9 @@
 #include "hcomm/base/refptr.hpp"
 #include "hcomm/promise/promise.hpp"
 
+#ifndef HCOMM_SYNC_BRIDGE_HPP_
+#define HCOMM_SYNC_BRIDGE_HPP_
+
 namespace hcomm {
 template <typename T, typename E>
 struct Bridge;
@@ -477,3 +480,5 @@ auto scheduleFor(Executor* exec, PromiseImpl<C> promise) -> Consumer<typename P:
 }
 
 } // namespace hcomm
+
+#endif // HCOMM_SYNC_BRIDGE_HPP_

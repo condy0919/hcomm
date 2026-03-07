@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 
-#include "hcomm/promise/bridge.hpp"
+#include "hcomm/sync/bridge.hpp"
 
 #include <string>
 

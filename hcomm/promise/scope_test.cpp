@@ -8,7 +8,6 @@
 
 #include <gtest/gtest.h>
 
-#include "hcomm/promise/bridge.hpp"
 #include "hcomm/promise/single_threaded_executor.hpp"
 
 namespace {
