@@ -434,6 +434,24 @@ TEST_F(PromiseTest, discard) {
     EXPECT_TRUE((std::is_same_v<decltype(result)::ErrorType, void>));
 }
 
+TEST_F(PromiseTest, DrainsUntilPending) {
+    int execution_count = 0;
+
+    auto task = hcomm::repeat([&execution_count]() {
+        return hcomm::makePromise([&execution_count](hcomm::Context& ctx) -> hcomm::Result<void, int> {
+            if (++execution_count <= 3) {
+                return hcomm::Ok();
+            } else {
+                return hcomm::Pending{};
+            }
+        });
+    });
+
+    auto result = task(ctx_);
+    EXPECT_TRUE(!result);
+    EXPECT_EQ(execution_count, 4);
+}
+
 TEST_F(PromiseTest, joinPromise) {
     int cnt = 0;
     auto p = hcomm::joinPromises(
