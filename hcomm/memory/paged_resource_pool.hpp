@@ -407,7 +407,7 @@ private:
     std::atomic<Block*> block_ptrs_[kMaxBlocks] = {nullptr};
 
     /// The current number of allocated and published blocks.
-    std::atomic<std::uint32_t> num_blocks_;
+    std::uint32_t num_blocks_;
 
     /// The head of the lock-free stack of free slots, represented as a tagged index to prevent the ABA problem.
     ///
@@ -503,8 +503,7 @@ private:
             return true;
         }
 
-        // Relaxed load is safe because we hold the mutex. No other thread can be modifying `num_blocks_`.
-        const std::uint32_t block_idx = num_blocks_.load(std::memory_order_relaxed);
+        const std::uint32_t block_idx = num_blocks_;
         if (block_idx >= kMaxBlocks) {
             return false;
         }
@@ -528,7 +527,7 @@ private:
         // The release semantics ensure that all prior writes to the `new_block` (initializing the slots) are visible
         // before other threads can see the pointer to it via an acquire-load.
         block_ptrs_[block_idx].store(new_block, std::memory_order_release);
-        num_blocks_.store(block_idx + 1, std::memory_order_release);
+        num_blocks_ = block_idx + 1;
 
         // Atomically prepend the new list of slots to the global free list.
         const std::uint32_t new_chain_head = base_idx;
