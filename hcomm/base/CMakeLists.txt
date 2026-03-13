@@ -23,6 +23,7 @@ if(HCOMM_BUILD_TESTS)
     refptr_test.cpp
     weakptr_test.cpp
     scope_exit_test.cpp
+    work_stealing_deque_test.cpp
   )
   target_link_libraries(hcomm_base_test
     PRIVATE
