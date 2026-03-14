@@ -215,10 +215,10 @@ public:
                 return std::nullopt;
             }
 
-            // Prepare the new head for the free list. Relaxed memory order is sufficient here because we have
-            // effectively acquired ownership of this slot by popping it from the `free_head_` stack. No other thread
-            // should be accessing `next_free_idx` of this slot. Its value was set before the slot was pushed to the
-            // free list, and its visibility is guaranteed by the acquire on `free_head_`.
+            // Prepare the new head for the free list. Relaxed memory order is sufficient here because the value of
+            // `next_free_idx` was set before the slot was pushed to the free list, and its visibility is guaranteed
+            // by the acquire on `free_head_`. While multiple threads may speculatively read this value, only the one
+            // that succeeds in the subsequent CAS will actually pop the slot and own it.
             const std::uint32_t next_idx = slot->next_free_idx.load(std::memory_order_relaxed);
             const std::uint32_t next_tag = current_head.tag() + 1;
             internal::TaggedIndex new_head(next_idx, next_tag);
