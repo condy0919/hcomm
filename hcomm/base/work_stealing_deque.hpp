@@ -16,55 +16,45 @@ namespace hcomm {
 ///
 /// # Algorithm Origin
 ///
-/// This algorithm was originally proposed by David Chase and Yossi Lev in their 2005
-/// paper "Dynamic Circular Work-Stealing Deque". It was further refined for weak
-/// memory models (like ARM or PowerPC) by Nhat Minh Lê et al. in their 2013 paper
-/// "Correct and Efficient Work-Stealing for Weak Memory Models".
+/// This algorithm was originally proposed by David Chase and Yossi Lev in their 2005 paper "Dynamic Circular
+/// Work-Stealing Deque". It was further refined for weak memory models (like ARM or PowerPC) by Nhat Minh Lê et al. in
+/// their 2013 paper "Correct and Efficient Work-Stealing for Weak Memory Models".
 ///
-/// It is a fundamental building block for modern task-based parallel runtimes
-/// (like Go, Rust's Tokio, or Intel TBB).
+/// It is a fundamental building block for modern task-based parallel runtimes (like Go, Rust's Tokio, or Intel TBB).
 ///
 /// # Mental Model: Private Stack vs. Public Queue
 ///
 /// This deque functions as a hybrid between a thread-local stack and a concurrent queue:
 ///
-/// 1. **The Owner (LIFO Stack Behavior)**: The thread owning the deque interacts
-///    exclusively with the **Bottom**. It pushes and pops tasks in a "Last-In-First-Out"
-///    manner. This maximizes **cache locality**, as the most recently produced
-///    task (likely a sub-problem) is processed while its data is still warm in the
-///    L1/L2 cache.
-/// 2. **The Stealers (FIFO Queue Behavior)**: Other threads attempt to "steal" from
-///    the **Top**. They take the oldest tasks in a "First-In-First-Out" manner. In
-///    recursive task decomposition, older tasks represent the largest branches of the
-///    computation tree. Stealing these "coarse-grained" tasks ensures that the
-///    stealing thread remains productive for longer, minimizing future contention.
-/// 3. **The Synchronization Point**: The design ensures that the Owner and Stealers
-///    operate on opposite ends of the buffer, eliminating most contention. A
-///    formal "duel" (atomic CAS) only occurs when the deque is reduced to a
+/// 1. **The Owner (LIFO Stack Behavior)**: The thread owning the deque interacts exclusively with the **Bottom**. It
+///    pushes and pops tasks in a "Last-In-First-Out" manner. This maximizes **cache locality**, as the most recently
+///    produced task (likely a sub-problem) is processed while its data is still warm in the L1/L2 cache.
+/// 2. **The Stealers (FIFO Queue Behavior)**: Other threads attempt to "steal" from the **Top**. They take the oldest
+///    tasks in a "First-In-First-Out" manner. In recursive task decomposition, older tasks represent the largest
+///    branches of the computation tree. Stealing these "coarse-grained" tasks ensures that the stealing thread remains
+///    productive for longer, minimizing future contention.
+/// 3. **The Synchronization Point**: The design ensures that the Owner and Stealers operate on opposite ends of the
+///    buffer, eliminating most contention. A formal "duel" (atomic CAS) only occurs when the deque is reduced to a
 ///    single element, ensuring that exactly one thread claims the final task.
 ///
 /// # High-Level Principles
 ///
 /// - **Topology**: The deque has two ends: "Top" (public/shared) and "Bottom" (private).
-/// - **Wait-Free Push**: The Owner can push tasks without being blocked by
-///   concurrent Stealers, ensuring high throughput for the local worker.
-/// - **Lock-Free Coordination**: Most operations progress without locks.
-///   Strong memory barriers (SeqCst) are only used to resolve races on the
-///   last remaining element.
+/// - **Wait-Free Push**: The Owner can push tasks without being blocked by concurrent Stealers, ensuring high
+///   throughput for the local worker.
+/// - **Lock-Free Coordination**: Most operations progress without locks. Strong memory barriers (SeqCst) are only used
+///   to resolve races on the last remaining element.
 ///
 /// # Implementation Notes
 ///
-/// This specific implementation is a **Bounded** version of the Chase-Lev deque.
-/// Unlike the original paper which describes a dynamic circular buffer, this version
-/// uses a fixed-size `std::array` for performance and simplicity in embedded or
-/// high-performance networking contexts.
+/// This specific implementation is a **Bounded** version of the Chase-Lev deque. Unlike the original paper which
+/// describes a dynamic circular buffer, this version uses a fixed-size `std::array` for performance and simplicity in
+/// embedded or high-performance networking contexts.
 ///
-/// - **Memory Barriers**: Uses a combination of Acquire/Release semantics and
-///   `std::memory_order_seq_cst` fences to ensure correctness across different CPU
-///   architectures (especially weak-memory models like ARM).
-/// - **False Sharing**: `top_` and `bottom_` are padded to separate cache lines
-///   to prevent performance degradation caused by cache coherence traffic between
-///   the Owner and Stealers.
+/// - **Memory Barriers**: Uses a combination of Acquire/Release semantics and `std::memory_order_seq_cst` fences to
+///   ensure correctness across different CPU architectures (especially weak-memory models like ARM).
+/// - **False Sharing**: `top_` and `bottom_` are padded to separate cache lines to prevent performance degradation
+///   caused by cache coherence traffic between the Owner and Stealers.
 template <typename T, std::size_t Capacity = 256>
 class WorkStealingDeque final {
     static_assert(Capacity != 0 && (Capacity & (Capacity - 1)) == 0,
@@ -138,7 +128,7 @@ public:
         t = top_.load(std::memory_order_relaxed);
 
         if (t < b) {
-            // 绝对安全区，队列里还有多余的任务，绝对不会和 Stealer 冲突
+            // Safe zone: multiple elements remain in the deque, ensuring no conflict with concurrent stealers.
             return std::move(buffer_[b & kMask]);
         } else if (t == b) {
             // Last element race: use CAS to ensure only one thread (Owner or Stealer) claims the element by
@@ -163,7 +153,7 @@ public:
     ///
     /// Uses a SeqCst fence to coordinate with the Owner's pop() and multiple concurrent Stealers.
     ///
-    /// Note: Susceptible to wrap-around overwrite if the stealer is preempted and the owner pushes exactly Capacity
+    /// NOTE: Susceptible to wrap-around overwrite if the stealer is preempted and the owner pushes exactly Capacity
     /// elements before the stealer reads the buffer. Practically impossible with large capacities.
     std::optional<T> steal() noexcept {
         std::size_t t = top_.load(std::memory_order_acquire);
@@ -187,11 +177,18 @@ public:
 
     /// Returns the approximate number of tasks in the deque.
     ///
-    /// Note: This is a concurrent snapshot and should only be used for heuristics or logging.
+    /// NOTE: This is a concurrent snapshot and should only be used for heuristics or logging.
     std::size_t size() const noexcept {
         const std::size_t b = bottom_.load(std::memory_order_relaxed);
         const std::size_t t = top_.load(std::memory_order_relaxed);
         return b >= t ? b - t : 0;
+    }
+
+    /// Returns true if the deque is approximately empty.
+    ///
+    /// Like size(), this provides a concurrent snapshot and should be used primarily for heuristics.
+    bool empty() const noexcept {
+        return size() == 0;
     }
 
     /// Returns the fixed capacity of the deque.

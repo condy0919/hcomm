@@ -12,33 +12,57 @@ namespace {
 TEST(WorkStealingDeque, BasicOps) {
     hcomm::WorkStealingDeque<int, 8> deque;
     EXPECT_EQ(deque.size(), 0);
+    EXPECT_TRUE(deque.empty());
 
     // Push items
     EXPECT_TRUE(deque.push(1));
+    EXPECT_FALSE(deque.empty());
     EXPECT_TRUE(deque.push(2));
     EXPECT_TRUE(deque.push(3));
     EXPECT_EQ(deque.size(), 3);
+    EXPECT_FALSE(deque.empty());
 
     // Pop items (LIFO)
     EXPECT_EQ(deque.pop(), 3);
     EXPECT_EQ(deque.pop(), 2);
+    EXPECT_FALSE(deque.empty());
     EXPECT_EQ(deque.pop(), 1);
+    EXPECT_EQ(deque.size(), 0);
+    EXPECT_TRUE(deque.empty());
     EXPECT_EQ(deque.pop(), std::nullopt);
 }
 
 TEST(WorkStealingDeque, StealOps) {
     hcomm::WorkStealingDeque<int, 8> deque;
+    EXPECT_TRUE(deque.empty());
 
     // Push items
     deque.push(10);
     deque.push(20);
     deque.push(30);
+    EXPECT_FALSE(deque.empty());
 
     // Steal items (FIFO)
     EXPECT_EQ(deque.steal(), 10);
     EXPECT_EQ(deque.steal(), 20);
+    EXPECT_FALSE(deque.empty());
     EXPECT_EQ(deque.steal(), 30);
+    EXPECT_TRUE(deque.empty());
     EXPECT_EQ(deque.steal(), std::nullopt);
+}
+
+TEST(WorkStealingDeque, Empty) {
+    hcomm::WorkStealingDeque<int, 4> deque;
+    EXPECT_TRUE(deque.empty());
+    EXPECT_EQ(deque.size(), 0);
+
+    deque.push(1);
+    EXPECT_FALSE(deque.empty());
+    EXPECT_EQ(deque.size(), 1);
+
+    deque.pop();
+    EXPECT_TRUE(deque.empty());
+    EXPECT_EQ(deque.size(), 0);
 }
 
 TEST(WorkStealingDeque, LastElementDuel) {
