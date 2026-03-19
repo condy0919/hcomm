@@ -3,6 +3,7 @@
 target_sources(hcomm
   PUBLIC
     single_threaded_executor.cpp
+    thread_pool_executor.cpp
 )
 
 if(HCOMM_BUILD_TESTS)
@@ -12,6 +13,7 @@ if(HCOMM_BUILD_TESTS)
     scope_test.cpp
     single_threaded_executor_test.cpp
     inline_executor_test.cpp
+    thread_pool_executor_test.cpp
   )
   target_link_libraries(hcomm_promise_test
     PRIVATE

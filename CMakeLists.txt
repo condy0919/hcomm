@@ -9,7 +9,7 @@ project(hcomm
   VERSION 0.1.0
   LANGUAGES C CXX
   DESCRIPTION "Modern hcom"
-  HOMEPAGE_URL "https://github.com/condy0919/mhcom"
+  HOMEPAGE_URL "https://github.com/condy0919/hcomm"
 )
 
 include(CTest)
