@@ -72,6 +72,7 @@ TEST(ThreadPoolExecutorTest, WorkStealing) {
 
 TEST(ThreadPoolExecutorTest, RescheduleWithWaker) {
     std::atomic<int> run_count{0};
+    std::atomic<bool> waker_set{false};
     std::binary_semaphore sem{0};
     hcomm::ThreadPoolExecutor exec(2);
     hcomm::Waker waker;
@@ -80,6 +81,7 @@ TEST(ThreadPoolExecutorTest, RescheduleWithWaker) {
         run_count++;
         if (run_count == 1) {
             waker = ctx.waker();
+            waker_set.store(true);
             return hcomm::Pending{}; // Not done yet, wait to be woken.
         }
         sem.release();
@@ -94,6 +96,9 @@ TEST(ThreadPoolExecutorTest, RescheduleWithWaker) {
     EXPECT_EQ(run_count.load(), 1);
 
     // Manually wake the task.
+    while (!waker_set.load()) {
+        std::this_thread::yield();
+    }
     waker.wake();
 
     sem.acquire();
