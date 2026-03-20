@@ -94,6 +94,12 @@ public:
             worker.request_stop();
         }
         global_cv_.notify_all();
+
+        for (auto& worker : workers_) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
     }
 
     /// Schedules a new task for execution.
@@ -150,7 +156,7 @@ private:
                 // batch_size = min(global_queue_size / num_workers + 1, kMaxGlobalFetchBatch)
                 const std::size_t global_size = global_queue_.size();
                 const std::size_t num_workers = local_queues_.size();
-                std::size_t batch_size = std::min(global_size / num_workers + 1, kMaxGlobalFetchBatch);
+                std::size_t batch_size = std::min({global_size / num_workers + 1, kMaxGlobalFetchBatch, global_size});
 
                 auto node = RefPtr<ScheduledTaskNode>::adopt(&global_queue_.front());
                 global_queue_.pop_front();
