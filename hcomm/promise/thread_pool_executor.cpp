@@ -5,6 +5,7 @@
 #include <stop_token>
 #include <vector>
 
+#include "hcomm/base/hint.hpp"
 #include "hcomm/base/scope_exit.hpp"
 #include "hcomm/base/work_stealing_deque.hpp"
 #include <boost/intrusive/list.hpp>
@@ -25,6 +26,8 @@ inline std::uint32_t xorshift32(std::uint32_t& state) {
 constexpr std::size_t kInvalidWorkerId = static_cast<std::size_t>(-1);
 constexpr std::size_t kLocalQueueCapacity = 256;
 constexpr std::size_t kMaxGlobalFetchBatch = 32;
+
+constexpr std::uint32_t kMaxSpin = 200;
 
 /// A node representing a task scheduled in the thread pool.
 /// Inherits from WakerImpl to allow rescheduling when a task is woken up.
@@ -95,6 +98,7 @@ public:
         }
         global_cv_.notify_all();
 
+        // 先停止线程先，保证它们不会访问到已失效的 local_queues_
         for (auto& worker : workers_) {
             if (worker.joinable()) {
                 worker.join();
@@ -211,37 +215,50 @@ private:
         while (true) {
             if (auto task = tryGetTask(worker_id)) {
                 [[maybe_unused]] bool done = task->run();
-            } else {
-                // TODO spinning for a while
+                continue;
+            }
 
-                // No tasks found; transition to sleeping state.
-                std::unique_lock lock(global_mtx_);
+            // 尝试自旋转一会儿，减少上下文切换
+            bool found = false;
+            for (std::uint32_t i = 0; i < kMaxSpin; ++i) {
+                spin_loop_hint();
+                if (auto task = tryGetTask(worker_id)) {
+                    [[maybe_unused]] bool done = task->run();
+                    found = true;
+                    break;
+                }
+            }
+            if (found) {
+                continue;
+            }
 
-                worker_state_.fetch_add(kSleepingInc);
+            // No tasks found; transition to sleeping state.
+            std::unique_lock lock(global_mtx_);
 
-                bool woken = global_cv_.wait(lock, stoken, [this, worker_id]() {
-                    // Check if tasks are available globally or locally.
-                    if (!global_queue_.empty() || !local_queues_[worker_id].empty()) {
+            worker_state_.fetch_add(kSleepingInc);
+
+            bool woken = global_cv_.wait(lock, stoken, [this, worker_id]() {
+                // Check if tasks are available globally or locally.
+                if (!global_queue_.empty() || !local_queues_[worker_id].empty()) {
+                    return true;
+                }
+
+                // TODO inefficient
+
+                // Check if any other worker has tasks available for stealing.
+                for (std::size_t i = 0; i < local_queues_.size(); ++i) {
+                    if (i != worker_id && local_queues_[i].size()) {
                         return true;
                     }
-
-                    // TODO inefficient
-
-                    // Check if any other worker has tasks available for stealing.
-                    for (std::size_t i = 0; i < local_queues_.size(); ++i) {
-                        if (i != worker_id && local_queues_[i].size()) {
-                            return true;
-                        }
-                    }
-                    return false;
-                });
-
-                worker_state_.fetch_sub(kSleepingInc);
-
-                // Exit if stop is requested and no pending tasks remain.
-                if (stoken.stop_requested() && global_queue_.empty() && !woken) {
-                    return;
                 }
+                return false;
+            });
+
+            worker_state_.fetch_sub(kSleepingInc);
+
+            // Exit if stop is requested and no pending tasks remain.
+            if (stoken.stop_requested() && global_queue_.empty() && !woken) {
+                return;
             }
         }
     }
