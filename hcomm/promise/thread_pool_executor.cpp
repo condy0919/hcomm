@@ -137,7 +137,10 @@ public:
 
         task_count_.fetch_add(1, std::memory_order_release);
 
-        // Notify a sleeping worker if no threads are currently searching for tasks.
+        // Only notify a sleeping worker if no other workers are currently in the 'searching' state.
+        //
+        // If searching > 0, at least one worker is already actively polling the global queue or stealing from peers,
+        // so an explicit notification is redundant and would cause unnecessary context switches.
         const std::uint32_t state = worker_state_.load(std::memory_order_relaxed);
         const std::uint32_t searching = state >> 16;
         const std::uint32_t sleeping = state & 0xffff;
@@ -165,8 +168,11 @@ private:
         {
             std::unique_lock lock(global_mtx_, std::try_to_lock);
             if (lock.owns_lock() && !global_queue_.empty()) {
-                // Dynamically calculate the fetch batch size to balance throughput and contention.
-                // batch_size = min(global_queue_size / num_workers + 1, kMaxGlobalFetchBatch)
+                // We use dynamic batching to amortize the cost of the global mutex.
+                //
+                // By fetching `global_size/num_workers + 1` tasks, we attempt to distribute the load fairly in a
+                // single lock acquisition while `kMaxGlobalFetchBatch` prevents a single worker from starving others by
+                // hoarding too many tasks.
                 const std::size_t global_size = global_queue_.size();
                 const std::size_t num_workers = local_queues_.size();
                 std::size_t batch_size = std::min({global_size / num_workers + 1, kMaxGlobalFetchBatch, global_size});
@@ -248,6 +254,11 @@ private:
             }
 
             // No tasks found; transition to sleeping state.
+            //
+            // This 'Check-Then-Sleep' pattern is critical for liveness. We use task_count_ as a global
+            // version/sequence number. By loading it with acquire semantics before checking the queues and again in
+            // the CV predicate, we ensure that any task submitted BEFORE we entered the sleep state is guaranteed to
+            // be visible, preventing the 'lost wake-up' problem without requiring seq_cst on every state transition.
             const std::size_t last_task_count = task_count_.load(std::memory_order_acquire);
             worker_state_.fetch_add(kSleepingInc, std::memory_order_relaxed);
 
