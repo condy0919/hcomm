@@ -27,6 +27,7 @@ constexpr std::size_t kInvalidWorkerId = static_cast<std::size_t>(-1);
 constexpr std::size_t kLocalQueueCapacity = 256;
 constexpr std::size_t kMaxGlobalFetchBatch = 32;
 
+/// Usually, a context switch takes about 2us, whereas a "memory" pause (hint) is around 10ns.
 constexpr std::uint32_t kMaxSpin = 200;
 
 /// A node representing a task scheduled in the thread pool.
@@ -85,8 +86,14 @@ public:
             workers_.emplace_back([i, this](std::stop_token stoken) {
                 tls_worker_ctx_ = {
                     .id = i,
-                    .rng_state = static_cast<std::uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id())),
+                    .rng_state = static_cast<std::uint32_t>(
+                        std::hash<std::thread::id>{}(std::this_thread::get_id()) ^
+                        static_cast<std::size_t>(std::chrono::steady_clock::now().time_since_epoch().count())),
                 };
+                if (tls_worker_ctx_.rng_state == 0) {
+                    tls_worker_ctx_.rng_state = 0xbadc0de;
+                }
+
                 runInThread(std::move(stoken), i);
             });
         }
@@ -98,7 +105,7 @@ public:
         }
         global_cv_.notify_all();
 
-        // 先停止线程先，保证它们不会访问到已失效的 local_queues_
+        // Stop threads first to ensure they don't access local_queues_ after it becomes invalid.
         for (auto& worker : workers_) {
             if (worker.joinable()) {
                 worker.join();
@@ -128,10 +135,12 @@ public:
             global_queue_.push_back(*node.detach());
         }
 
+        task_count_.fetch_add(1, std::memory_order_release);
+
         // Notify a sleeping worker if no threads are currently searching for tasks.
-        std::uint32_t state = worker_state_.load();
-        std::uint32_t searching = state >> 16;
-        std::uint32_t sleeping = state & 0xffff;
+        const std::uint32_t state = worker_state_.load(std::memory_order_relaxed);
+        const std::uint32_t searching = state >> 16;
+        const std::uint32_t sleeping = state & 0xffff;
         if (searching == 0 && sleeping > 0) {
             global_cv_.notify_one();
         }
@@ -149,8 +158,8 @@ private:
             }
         }
 
-        worker_state_.fetch_add(kSearchingInc);
-        auto guard = ScopeExit([this]() { worker_state_.fetch_sub(kSearchingInc); });
+        worker_state_.fetch_add(kSearchingInc, std::memory_order_relaxed);
+        auto guard = ScopeExit([this]() { worker_state_.fetch_sub(kSearchingInc, std::memory_order_relaxed); });
 
         // Try fetching from the global queue with batching.
         {
@@ -218,7 +227,13 @@ private:
                 continue;
             }
 
-            // 尝试自旋转一会儿，减少上下文切换
+            // TODO spin on searcher
+
+            // Attempt to spin for a short duration to avoid the heavy cost of a context switch. A thread context
+            // switch on Linux typically takes ~2us while a single `spin_loop_hint` (e.g., x86 PAUSE) takes ~10ns to
+            // 50ns depending on the architecture. By spinning for kMaxSpin (200) iterations, we spend ~2us-10us, which
+            // matches or slightly exceeds the context switch cost, allowing us to pick up new tasks with minimal
+            // latency.
             bool found = false;
             for (std::uint32_t i = 0; i < kMaxSpin; ++i) {
                 spin_loop_hint();
@@ -233,28 +248,21 @@ private:
             }
 
             // No tasks found; transition to sleeping state.
+            const std::size_t last_task_count = task_count_.load(std::memory_order_acquire);
+            worker_state_.fetch_add(kSleepingInc, std::memory_order_relaxed);
+
             std::unique_lock lock(global_mtx_);
-
-            worker_state_.fetch_add(kSleepingInc);
-
-            bool woken = global_cv_.wait(lock, stoken, [this, worker_id]() {
+            bool woken = global_cv_.wait(lock, stoken, [this, last_task_count, worker_id]() {
                 // Check if tasks are available globally or locally.
                 if (!global_queue_.empty() || !local_queues_[worker_id].empty()) {
                     return true;
                 }
 
-                // TODO inefficient
-
                 // Check if any other worker has tasks available for stealing.
-                for (std::size_t i = 0; i < local_queues_.size(); ++i) {
-                    if (i != worker_id && local_queues_[i].size()) {
-                        return true;
-                    }
-                }
-                return false;
+                return task_count_.load(std::memory_order_acquire) != last_task_count;
             });
 
-            worker_state_.fetch_sub(kSleepingInc);
+            worker_state_.fetch_sub(kSleepingInc, std::memory_order_relaxed);
 
             // Exit if stop is requested and no pending tasks remain.
             if (stoken.stop_requested() && global_queue_.empty() && !woken) {
@@ -270,17 +278,25 @@ private:
 
     ThreadPoolExecutor* executor_;
 
+    std::atomic<std::size_t> task_count_{0};
+
+    std::mutex global_mtx_;
+    std::condition_variable_any global_cv_;
+    TaskList global_queue_;
+
     std::vector<WorkStealingDeque<RefPtr<ScheduledTaskNode>, kLocalQueueCapacity>> local_queues_;
     std::vector<std::jthread> workers_;
     static thread_local WorkerContext tls_worker_ctx_;
 
     static constexpr std::uint32_t kSearchingInc = 1 << 16;
     static constexpr std::uint32_t kSleepingInc = 1;
+    /// Tracks the counts of searching and sleeping workers.
+    ///
+    /// All operations on this variable use memory_order_relaxed because it serves as a heuristic hint for
+    /// notifications rather than a strict synchronization primitive. Correctness is ultimately guaranteed by
+    /// task_count_ (using release/acquire) and the condition variable's predicate. This relaxed ordering significantly
+    /// reduces cache coherence traffic in hot paths like work-stealing and spinning.
     std::atomic<std::uint32_t> worker_state_{0};
-
-    std::mutex global_mtx_;
-    std::condition_variable_any global_cv_;
-    TaskList global_queue_;
 };
 
 thread_local ThreadPoolExecutor::Dispatcher::WorkerContext ThreadPoolExecutor::Dispatcher::tls_worker_ctx_ = {
@@ -290,7 +306,7 @@ thread_local ThreadPoolExecutor::Dispatcher::WorkerContext ThreadPoolExecutor::D
 
 /// Constructs a new ThreadPoolExecutor with the specified number of threads.
 ThreadPoolExecutor::ThreadPoolExecutor(std::size_t num_threads)
-    : dispatcher_(std::make_unique<Dispatcher>(this, num_threads)) {}
+    : dispatcher_(std::make_unique<Dispatcher>(this, std::max<std::size_t>(num_threads, 1))) {}
 
 ThreadPoolExecutor::~ThreadPoolExecutor() {}
 
